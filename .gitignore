@@ -30,3 +30,7 @@ Thumbs.db
 # 运行时生成文件（通常在目标项目目录中）
 **/progress.md
 **/feature_list.json
+
+# 本地代理说明文件（不提交到远程）
+AGENTS.md
+agent.md
