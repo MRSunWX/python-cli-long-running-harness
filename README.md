@@ -86,7 +86,8 @@ python main.py run <project_dir> [--iterations N] [--continuous] [--task feat-xx
 
 作用：执行单次或连续迭代。
 - 单次模式：处理一个“下一个可执行”功能。
-- 连续模式：循环执行直到完成、阻塞或达到最大轮数。
+- 连续模式：循环执行直到完成、阻塞或达到最大轮数；每轮会创建全新的 Agent 实例（fresh context）。
+- 若目录内不存在 `feature_list.json` 且存在 `app_spec.txt`，`run` 会自动触发首轮初始化（initializer）。
 
 ### `status`
 
@@ -140,13 +141,18 @@ python main.py add-feature <project_dir> \
 ### 3) 运行阶段（`run`）
 
 每轮执行流程：
-1. 会话前检查：优先执行 `bash ./init.sh`
-2. 选择下一个可执行功能
-3. 组装会话上下文并调用 Agent
-4. 执行 `verify_commands` 验收
-5. 更新 feature 状态与 `progress.md`
-6. 有代码改动则自动提交（`feat:` 或 `wip:`）
-7. 追加 `run_logs.jsonl`
+1. 首轮判定：若无 `feature_list.json`，尝试读取 `app_spec.txt` 自动初始化
+2. 会话前检查：优先执行 `bash ./init.sh`
+3. 选择下一个可执行功能
+4. 组装会话上下文并调用 Agent
+5. 执行 `verify_commands` 验收
+6. 更新 feature 状态与 `progress.md`
+7. 有代码改动则自动提交（`feat:` 或 `wip:`）
+8. 追加 `run_logs.jsonl`
+
+连续模式补充：
+- 默认轮间自动继续等待 `3` 秒（来自 `Config.AUTO_CONTINUE_DELAY`）。
+- 每一轮都会新建 Agent 实例，保证“新上下文窗口”语义。
 
 ## `feature_list.json` 结构与调度规则
 

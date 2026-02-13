@@ -981,17 +981,82 @@ echo \"[init.sh] 初始化检查通过\"
 
         feature_list = self.progress_manager.load_feature_list(force_reload=True)
         if feature_list is None:
-            payload = {"success": False, "error": "未找到 feature_list.json，请先执行 init"}
+            # 对齐 quickstart：若 feature_list.json 不存在，视为首轮，自动执行初始化阶段
+            spec_path = os.path.join(self.project_dir, "app_spec.txt")
+            if not os.path.exists(spec_path):
+                payload = {
+                    "success": False,
+                    "error": "未找到 feature_list.json，且缺少 app_spec.txt，无法自动初始化",
+                }
+                emit_event(
+                    event_type="session_end",
+                    component="agent",
+                    name="run",
+                    payload={"message": payload["error"]},
+                    ok=False,
+                    iteration=self._iteration_count,
+                    phase="run",
+                )
+                return payload
+
+            try:
+                with open(spec_path, "r", encoding="utf-8") as spec_file:
+                    requirements = spec_file.read().strip()
+            except Exception as exc:
+                payload = {"success": False, "error": f"读取 app_spec.txt 失败: {exc}"}
+                emit_event(
+                    event_type="error",
+                    component="agent",
+                    name="run_auto_init",
+                    payload={"message": payload["error"]},
+                    ok=False,
+                    iteration=self._iteration_count,
+                    phase="run",
+                )
+                return payload
+
             emit_event(
-                event_type="session_end",
+                event_type="session_start",
                 component="agent",
-                name="run",
-                payload={"message": payload["error"]},
-                ok=False,
+                name="run_auto_init",
+                payload={"message": "检测到首轮运行，自动进入初始化阶段", "spec_path": spec_path},
+                ok=True,
                 iteration=self._iteration_count,
                 phase="run",
             )
-            return payload
+            init_ok = self.initialize(
+                requirements=requirements,
+                project_name=os.path.basename(self.project_dir),
+                init_mode="open",
+            )
+            if not init_ok:
+                payload = {"success": False, "error": "首轮自动初始化失败"}
+                emit_event(
+                    event_type="session_end",
+                    component="agent",
+                    name="run",
+                    payload={"message": payload["error"]},
+                    ok=False,
+                    iteration=self._iteration_count,
+                    phase="run",
+                )
+                return payload
+
+            feature_list = self.progress_manager.load_feature_list(force_reload=True)
+            if feature_list is None:
+                payload = {"success": False, "error": "自动初始化完成但未生成 feature_list.json"}
+                emit_event(
+                    event_type="session_end",
+                    component="agent",
+                    name="run",
+                    payload={"message": payload["error"]},
+                    ok=False,
+                    iteration=self._iteration_count,
+                    phase="run",
+                )
+                return payload
+            # 初始化流程会将 phase 设为 init，这里恢复为 run 阶段上下文
+            update_event_context(phase="run", project_dir=self.project_dir)
 
         precheck_result = self._run_session_precheck()
         if not precheck_result.get("ok"):
@@ -1292,31 +1357,61 @@ echo \"[init.sh] 初始化检查通过\"
     def run_continuous(
         self,
         max_total_iterations: int = 100,
-        pause_between_tasks: float = 1.0,
+        pause_between_tasks: Optional[float] = None,
     ) -> Dict[str, Any]:
         """连续执行任务直到完成、阻塞或达到最大轮次。"""
+        # 对齐 quickstart：连续模式默认自动继续 3 秒（可由配置覆盖）
+        effective_pause = (
+            Config.AUTO_CONTINUE_DELAY
+            if pause_between_tasks is None
+            else max(0.0, pause_between_tasks)
+        )
         results = {
             "completed_features": [],
             "failed_features": [],
             "total_iterations": 0,
         }
 
-        for _ in range(max_total_iterations):
+        for iteration_index in range(max_total_iterations):
+            # 每轮先强制刷新一次 feature_list，避免读取到当前实例缓存的旧状态
+            self.progress_manager.load_feature_list(force_reload=True)
             next_feature = self.progress_manager.get_next_feature()
             if next_feature is None:
                 break
 
-            result = self.run(max_iterations=Config.MAX_ITERATIONS)
+            # 对齐 quickstart：每轮都创建全新的 Agent 实例，确保 fresh context
+            session_agent = CodingAgent(
+                project_dir=self.project_dir,
+                model_name=self.model_name,
+                base_url=self.base_url,
+                temperature=self.temperature,
+            )
+            result = session_agent.run(max_iterations=Config.MAX_ITERATIONS)
             results["total_iterations"] += 1
 
-            feature_id = next_feature.id
+            feature_id = result.get("feature_id") or next_feature.id
             if result.get("success"):
                 results["completed_features"].append(feature_id)
             else:
                 results["failed_features"].append(feature_id)
 
-            if pause_between_tasks > 0:
-                time.sleep(pause_between_tasks)
+            emit_event(
+                event_type="session_end",
+                component="agent",
+                name="run_continuous_iteration",
+                payload={
+                    "iteration_index": iteration_index + 1,
+                    "feature_id": feature_id,
+                    "success": bool(result.get("success")),
+                    "status": result.get("status", "unknown"),
+                    "next_sleep_sec": effective_pause,
+                },
+                ok=bool(result.get("success")),
+                phase="run",
+            )
+
+            if effective_pause > 0:
+                time.sleep(effective_pause)
 
         return results
 
