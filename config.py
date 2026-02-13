@@ -4,14 +4,14 @@
 ====================
 
 本文件包含项目的全局配置信息，包括：
-- LLM 模型配置（Ollama 服务地址、模型名称等）
+- LLM 模型配置（OpenAI 兼容服务地址、模型名称等）
 - 项目默认设置
 - 安全相关配置
 - Agent 行为参数
 
 使用方式：
     from config import Config
-    print(Config.OLLAMA_BASE_URL)
+    print(Config.OPENAI_BASE_URL)
 """
 
 from dataclasses import dataclass, field
@@ -28,7 +28,7 @@ class Config:
     所有配置项都集中在这个类中管理，便于维护和修改。
 
     属性:
-        OLLAMA_BASE_URL: Ollama 服务的 API 地址
+        OPENAI_BASE_URL: OpenAI 兼容服务的 API 地址
         MODEL_NAME: 使用的模型名称
         TEMPERATURE: 生成文本的温度参数，控制随机性
         MAX_TOKENS: 单次生成的最大 token 数量
@@ -38,9 +38,9 @@ class Config:
         MAX_ITERATIONS: Agent 单次运行的最大迭代次数
     """
 
-    # Ollama 服务的 API 端点地址
-    # 使用 OpenAI 兼容的 /v1 接口
-    OLLAMA_BASE_URL: str = "http://10.33.101.35:11434/v1"
+    # OpenAI 兼容服务的 API 端点地址
+    # 推荐使用带 /v1 路径的兼容接口
+    OPENAI_BASE_URL: str = "http://10.33.101.35:11434/v1"
 
     # 使用的 Qwen3-Coder 模型名称
     # 这是一个 30B 参数的代码专用模型
@@ -52,7 +52,7 @@ class Config:
     TEMPERATURE: float = 0.1
 
     # 单次生成的最大 token 数量
-    # 根据 Ollama 和模型的限制设置
+    # 根据所接入模型服务的限制设置
     MAX_TOKENS: int = 4096
 
     # 允许执行的 Bash 命令白名单
@@ -154,7 +154,7 @@ MODEL_CONFIG = {
     "model": Config.MODEL_NAME,
     "temperature": Config.TEMPERATURE,
     "max_tokens": Config.MAX_TOKENS,
-    "base_url": Config.OLLAMA_BASE_URL,
+    "base_url": Config.OPENAI_BASE_URL,
 }
 """
 模型配置字典

@@ -57,7 +57,7 @@ if RICH_AVAILABLE:
 
 @click.group()
 @click.option('--model', default=None, help='模型名称（默认从配置读取）')
-@click.option('--url', default=None, help='Ollama API 地址')
+@click.option('--url', default=None, help='OpenAI 兼容 API 地址')
 @click.option('--verbose', '-v', is_flag=True, help='显示详细输出')
 @click.option(
     '--verbose-events/--quiet-events',
@@ -86,7 +86,7 @@ def cli(ctx, model, url, verbose, verbose_events):
     # 将选项保存到上下文中，供子命令使用
     ctx.ensure_object(dict)
     ctx.obj['model'] = model or Config.MODEL_NAME
-    ctx.obj['url'] = url or Config.OLLAMA_BASE_URL
+    ctx.obj['url'] = url or Config.OPENAI_BASE_URL
     ctx.obj['verbose'] = verbose
     ctx.obj['verbose_events'] = verbose_events
 

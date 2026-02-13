@@ -152,7 +152,7 @@ class CodingAgent:
         )
 
         self.model_name = model_name or Config.MODEL_NAME
-        self.base_url = base_url or Config.OLLAMA_BASE_URL
+        self.base_url = base_url or Config.OPENAI_BASE_URL
         self.temperature = (
             temperature if temperature is not None else Config.TEMPERATURE
         )

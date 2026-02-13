@@ -47,7 +47,7 @@ conda run -n demo python main.py status ./my_project --json
 1. Python 3 环境可用。
 2. 依赖已安装：`pip install -r requirements.txt`。
 3. 模型服务可访问：
-- 默认模型地址来自 `config.py`（`Config.OLLAMA_BASE_URL`）。
+- 默认模型地址来自 `config.py`（`Config.OPENAI_BASE_URL`）。
 - 默认模型名来自 `config.py`（`Config.MODEL_NAME`）。
 - 可通过 CLI 覆盖：`--url` 与 `--model`。
 
