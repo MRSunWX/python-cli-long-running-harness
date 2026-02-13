@@ -1370,6 +1370,7 @@ echo \"[init.sh] 初始化检查通过\"
             "completed_features": [],
             "failed_features": [],
             "total_iterations": 0,
+            "fatal_errors": [],
         }
 
         for iteration_index in range(max_total_iterations):
@@ -1399,6 +1400,8 @@ echo \"[init.sh] 初始化检查通过\"
             # 首轮初始化失败等不可恢复错误：结束连续模式
             elif (not result.get("success")) and (not feature_id) and result.get("error"):
                 stop_reason = "fatal_error"
+                results["failed_features"].append(f"iteration-{iteration_index + 1}")
+                results["fatal_errors"].append(str(result.get("error")))
 
             emit_event(
                 event_type="session_end",
@@ -1411,6 +1414,7 @@ echo \"[init.sh] 初始化检查通过\"
                     "status": result.get("status", "unknown"),
                     "next_sleep_sec": effective_pause,
                     "stop_reason": stop_reason or None,
+                    "error": result.get("error"),
                 },
                 ok=bool(result.get("success")),
                 phase="run",

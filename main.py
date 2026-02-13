@@ -341,13 +341,15 @@ def run(ctx, project_dir, iterations, continuous, task):
         # 显示结果
         if RICH_AVAILABLE:
             console.print(f"\n[green]完成的功能: {len(result['completed_features'])}[/green]")
-            if result['failed_features']:
-                console.print(f"[red]失败的功能: {len(result['failed_features'])}[/red]")
+            console.print(f"[red]失败的功能: {len(result['failed_features'])}[/red]")
+            if result.get('fatal_errors'):
+                console.print(f"[red]关键错误: {result['fatal_errors'][0]}[/red]")
             _end_command_event_log("run", True, "连续运行结束")
         else:
             print(f"\n完成的功能: {len(result['completed_features'])}")
-            if result['failed_features']:
-                print(f"失败的功能: {len(result['failed_features'])}")
+            print(f"失败的功能: {len(result['failed_features'])}")
+            if result.get('fatal_errors'):
+                print(f"关键错误: {result['fatal_errors'][0]}")
             _end_command_event_log("run", True, "连续运行结束")
     else:
         # 单次运行
