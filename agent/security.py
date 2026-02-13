@@ -26,6 +26,7 @@ from dataclasses import dataclass
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import Config, get_project_dir
+from .event_logger import emit_event
 
 
 @dataclass
@@ -122,6 +123,32 @@ class CommandValidator:
         else:
             self.blocked_pattern = None
 
+    @staticmethod
+    def _emit_reject_event(command: str, result: "SecurityCheckResult") -> None:
+        """
+        输出安全拦截事件日志
+
+        参数:
+            command: 原始命令
+            result: 安全检查结果
+        """
+        if result.allowed:
+            return
+        emit_event(
+            event_type="tool_result",
+            component="security",
+            name="command_validation",
+            payload={
+                "status": "blocked",
+                "returncode": 126,
+                "duration_sec": 0.0,
+                "stderr_preview": result.reason,
+                "input_preview": command,
+            },
+            ok=False,
+            phase="run",
+        )
+
     def validate(self, command: str) -> SecurityCheckResult:
         """
         验证命令是否安全可执行
@@ -153,22 +180,26 @@ class CommandValidator:
         # 步骤 2: 检查黑名单
         blocked_result = self._check_blocked(command)
         if not blocked_result.allowed:
+            self._emit_reject_event(command, blocked_result)
             return blocked_result
 
         # 步骤 3: 检查白名单（如果启用）
         if self.allowed_commands:
             whitelist_result = self._check_whitelist(command)
             if not whitelist_result.allowed:
+                self._emit_reject_event(command, whitelist_result)
                 return whitelist_result
 
         # 步骤 4: 检查路径限制
         path_result = self._check_paths(command)
         if not path_result.allowed:
+            self._emit_reject_event(command, path_result)
             return path_result
 
         # 步骤 5: 检测命令注入
         injection_result = self._check_injection(command)
         if not injection_result.allowed:
+            self._emit_reject_event(command, injection_result)
             return injection_result
 
         # 所有检查通过

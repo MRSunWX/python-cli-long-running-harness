@@ -40,6 +40,7 @@ from .progress import Feature, ProgressManager
 from .prompts import get_system_prompt, loader as prompt_loader
 from .security import get_validator
 from .tools import get_all_tools
+from .event_logger import emit_event, get_event_logger, setup_event_logger, update_event_context
 
 
 class SimpleAgentExecutor:
@@ -129,6 +130,26 @@ class CodingAgent:
         self.project_dir = os.path.abspath(project_dir)
         set_project_dir(self.project_dir)
         os.makedirs(self.project_dir, exist_ok=True)
+
+        # 若外部尚未初始化事件日志器，则使用默认配置兜底
+        if get_event_logger() is None:
+            setup_event_logger(
+                project_dir=self.project_dir,
+                verbose_events=Config.VERBOSE_EVENTS_DEFAULT,
+                persist_file=True,
+                phase="agent",
+            )
+        else:
+            update_event_context(project_dir=self.project_dir)
+
+        emit_event(
+            event_type="session_start",
+            component="agent",
+            name="agent_init",
+            payload={"message": "Agent 实例初始化", "project_dir": self.project_dir},
+            ok=True,
+            phase="agent",
+        )
 
         self.model_name = model_name or Config.MODEL_NAME
         self.base_url = base_url or Config.OLLAMA_BASE_URL
@@ -233,10 +254,19 @@ class CodingAgent:
 
     def _execute_validated_command(self, command: str, timeout: int) -> Dict[str, Any]:
         """执行经过安全校验的命令并返回结构化结果。"""
+        emit_event(
+            event_type="tool_use",
+            component="agent",
+            name="command_exec",
+            payload={"tool_name": "bash", "input_preview": command},
+            ok=True,
+            iteration=self._iteration_count,
+            phase="run",
+        )
         validator = get_validator()
         check_result = validator.validate_with_compound_handling(command)
         if not check_result.allowed:
-            return {
+            rejected = {
                 "ok": False,
                 "command": command,
                 "returncode": 126,
@@ -245,6 +275,21 @@ class CodingAgent:
                 "mode": "rejected",
                 "duration_sec": 0.0,
             }
+            emit_event(
+                event_type="tool_result",
+                component="agent",
+                name="command_exec",
+                payload={
+                    "status": "blocked",
+                    "returncode": rejected["returncode"],
+                    "duration_sec": rejected["duration_sec"],
+                    "stderr_preview": rejected["stderr"],
+                },
+                ok=False,
+                iteration=self._iteration_count,
+                phase="run",
+            )
+            return rejected
 
         start_time = time.time()
         try:
@@ -277,7 +322,7 @@ class CodingAgent:
                 timeout=timeout,
             )
 
-            return {
+            success = {
                 "ok": completed.returncode == 0,
                 "command": command,
                 "returncode": completed.returncode,
@@ -286,9 +331,25 @@ class CodingAgent:
                 "mode": mode,
                 "duration_sec": round(time.time() - start_time, 3),
             }
+            emit_event(
+                event_type="tool_result",
+                component="agent",
+                name="command_exec",
+                payload={
+                    "status": "done" if success["ok"] else "error",
+                    "returncode": success["returncode"],
+                    "duration_sec": success["duration_sec"],
+                    "stdout_preview": self._truncate_text(success["stdout"], 200),
+                    "stderr_preview": self._truncate_text(success["stderr"], 200),
+                },
+                ok=success["ok"],
+                iteration=self._iteration_count,
+                phase="run",
+            )
+            return success
 
         except subprocess.TimeoutExpired:
-            return {
+            timeout_result = {
                 "ok": False,
                 "command": command,
                 "returncode": 124,
@@ -297,8 +358,23 @@ class CodingAgent:
                 "mode": "timeout",
                 "duration_sec": round(time.time() - start_time, 3),
             }
+            emit_event(
+                event_type="tool_result",
+                component="agent",
+                name="command_exec",
+                payload={
+                    "status": "error",
+                    "returncode": timeout_result["returncode"],
+                    "duration_sec": timeout_result["duration_sec"],
+                    "stderr_preview": timeout_result["stderr"],
+                },
+                ok=False,
+                iteration=self._iteration_count,
+                phase="run",
+            )
+            return timeout_result
         except ValueError as exc:
-            return {
+            invalid = {
                 "ok": False,
                 "command": command,
                 "returncode": 2,
@@ -307,8 +383,23 @@ class CodingAgent:
                 "mode": "invalid",
                 "duration_sec": round(time.time() - start_time, 3),
             }
+            emit_event(
+                event_type="tool_result",
+                component="agent",
+                name="command_exec",
+                payload={
+                    "status": "error",
+                    "returncode": invalid["returncode"],
+                    "duration_sec": invalid["duration_sec"],
+                    "stderr_preview": invalid["stderr"],
+                },
+                ok=False,
+                iteration=self._iteration_count,
+                phase="run",
+            )
+            return invalid
         except Exception as exc:
-            return {
+            failed = {
                 "ok": False,
                 "command": command,
                 "returncode": 1,
@@ -317,11 +408,34 @@ class CodingAgent:
                 "mode": "error",
                 "duration_sec": round(time.time() - start_time, 3),
             }
+            emit_event(
+                event_type="tool_result",
+                component="agent",
+                name="command_exec",
+                payload={
+                    "status": "error",
+                    "returncode": failed["returncode"],
+                    "duration_sec": failed["duration_sec"],
+                    "stderr_preview": failed["stderr"],
+                },
+                ok=False,
+                iteration=self._iteration_count,
+                phase="run",
+            )
+            return failed
 
     def _ensure_init_script(self) -> None:
         """确保项目目录存在最小可用的 init.sh 脚本。"""
         init_path = os.path.join(self.project_dir, Config.INIT_SCRIPT_NAME)
         if os.path.exists(init_path):
+            emit_event(
+                event_type="precheck",
+                component="agent",
+                name="ensure_init_script",
+                payload={"message": "init.sh 已存在，跳过创建"},
+                ok=True,
+                phase="init",
+            )
             return
 
         init_content = """#!/usr/bin/env bash
@@ -334,22 +448,53 @@ echo \"[init.sh] 初始化检查通过\"
         with open(init_path, "w", encoding="utf-8") as file_obj:
             file_obj.write(init_content)
         os.chmod(init_path, 0o755)
+        emit_event(
+            event_type="precheck",
+            component="agent",
+            name="ensure_init_script",
+            payload={"message": "已创建最小 init.sh", "path": init_path},
+            ok=True,
+            phase="init",
+        )
 
     def _run_session_precheck(self) -> Dict[str, Any]:
         """执行会话前检查（优先运行 init.sh）。"""
         init_path = os.path.join(self.project_dir, Config.INIT_SCRIPT_NAME)
         if not os.path.exists(init_path):
-            return {
+            skipped = {
                 "ok": True,
                 "skipped": True,
                 "message": f"未找到 {Config.INIT_SCRIPT_NAME}，跳过会话前检查",
             }
+            emit_event(
+                event_type="precheck",
+                component="agent",
+                name="session_precheck",
+                payload={"message": skipped["message"]},
+                ok=True,
+                iteration=self._iteration_count,
+                phase="run",
+            )
+            return skipped
 
         result = self._execute_validated_command(
             command=f"bash ./{Config.INIT_SCRIPT_NAME}",
             timeout=Config.SESSION_PRECHECK_TIMEOUT,
         )
         result["skipped"] = False
+        emit_event(
+            event_type="precheck",
+            component="agent",
+            name="session_precheck",
+            payload={
+                "message": "会话前检查完成",
+                "returncode": result.get("returncode"),
+                "stderr_preview": self._truncate_text(result.get("stderr", ""), 200),
+            },
+            ok=result.get("ok", False),
+            iteration=self._iteration_count,
+            phase="run",
+        )
         return result
 
     @staticmethod
@@ -367,11 +512,21 @@ echo \"[init.sh] 初始化检查通过\"
         """执行功能验收命令并返回验证结果。"""
         commands = self._get_feature_verify_commands(feature)
         if not commands:
-            return {
+            no_verify = {
                 "passed": False,
                 "reason": "未配置验收命令，无法自动标记完成",
                 "results": [],
             }
+            emit_event(
+                event_type="verification",
+                component="agent",
+                name="feature_verification",
+                payload={"feature_id": feature.id, "reason": no_verify["reason"]},
+                ok=False,
+                iteration=self._iteration_count,
+                phase="run",
+            )
+            return no_verify
 
         command_results: List[Dict[str, Any]] = []
         for command in commands:
@@ -381,17 +536,45 @@ echo \"[init.sh] 初始化检查通过\"
             )
             command_results.append(result)
             if not result.get("ok"):
-                return {
+                failed = {
                     "passed": False,
                     "reason": f"验收失败: {command}",
                     "results": command_results,
                 }
+                emit_event(
+                    event_type="verification",
+                    component="agent",
+                    name="feature_verification",
+                    payload={
+                        "feature_id": feature.id,
+                        "reason": failed["reason"],
+                        "commands": commands,
+                    },
+                    ok=False,
+                    iteration=self._iteration_count,
+                    phase="run",
+                )
+                return failed
 
-        return {
+        verification_ok = {
             "passed": True,
             "reason": "所有验收命令通过",
             "results": command_results,
         }
+        emit_event(
+            event_type="verification",
+            component="agent",
+            name="feature_verification",
+            payload={
+                "feature_id": feature.id,
+                "reason": verification_ok["reason"],
+                "commands": commands,
+            },
+            ok=True,
+            iteration=self._iteration_count,
+            phase="run",
+        )
+        return verification_ok
 
     def _invoke_agent(self, prompt: str, chat_history: Optional[List[Any]] = None) -> Dict[str, Any]:
         """统一封装 Agent 调用，优先 LangGraph，失败回退到简易执行器。"""
@@ -404,14 +587,43 @@ echo \"[init.sh] 初始化检查通过\"
                 messages.extend(SimpleAgentExecutor._normalize_chat_history(history))
                 messages.append(HumanMessage(content=prompt))
                 result = self.agent_executor.invoke({"messages": messages})
-                return {"output": self._extract_langgraph_output(result)}
+                output_text = self._extract_langgraph_output(result)
+                emit_event(
+                    event_type="assistant_text",
+                    component="agent",
+                    name="assistant_response",
+                    payload={"text_preview": self._truncate_text(output_text, 500)},
+                    ok=True,
+                    iteration=self._iteration_count,
+                    phase="run",
+                )
+                return {"output": output_text}
             except Exception:
                 self._use_langgraph = False
 
-        return self._fallback_executor.invoke({"input": prompt, "chat_history": history})
+        fallback_result = self._fallback_executor.invoke({"input": prompt, "chat_history": history})
+        emit_event(
+            event_type="assistant_text",
+            component="agent",
+            name="assistant_response",
+            payload={"text_preview": self._truncate_text(fallback_result.get("output", ""), 500)},
+            ok=True,
+            iteration=self._iteration_count,
+            phase="run",
+        )
+        return fallback_result
 
     def initialize(self, requirements: str, project_name: Optional[str] = None) -> bool:
         """初始化项目进度文件、基础结构和初始 Git 提交。"""
+        update_event_context(phase="init", project_dir=self.project_dir)
+        emit_event(
+            event_type="session_start",
+            component="agent",
+            name="initialize",
+            payload={"message": "开始执行初始化流程"},
+            ok=True,
+            phase="init",
+        )
         if project_name is None:
             project_name = os.path.basename(self.project_dir)
 
@@ -457,10 +669,34 @@ echo \"[init.sh] 初始化检查通过\"
 
             if self.git_helper.has_changes():
                 self.git_helper.commit("chore: 项目初始化")
+                emit_event(
+                    event_type="git_commit",
+                    component="git",
+                    name="initialize_commit",
+                    payload={"message": "chore: 项目初始化"},
+                    ok=True,
+                    phase="init",
+                )
 
+            emit_event(
+                event_type="session_end",
+                component="agent",
+                name="initialize",
+                payload={"message": "初始化流程结束"},
+                ok=True,
+                phase="init",
+            )
             return True
         except Exception as exc:
             print(f"[Agent] 初始化失败: {exc}")
+            emit_event(
+                event_type="error",
+                component="agent",
+                name="initialize",
+                payload={"message": str(exc)},
+                ok=False,
+                phase="init",
+            )
             return False
 
     def run(
@@ -469,11 +705,31 @@ echo \"[init.sh] 初始化检查通过\"
         on_iteration: Optional[Callable[[int, Dict[str, Any]], None]] = None,
     ) -> Dict[str, Any]:
         """执行单次任务循环并处理一个可执行功能。"""
+        update_event_context(phase="run", project_dir=self.project_dir)
+        emit_event(
+            event_type="session_start",
+            component="agent",
+            name="run",
+            payload={"message": "开始执行单次运行"},
+            ok=True,
+            iteration=self._iteration_count,
+            phase="run",
+        )
         _ = max_iterations or Config.MAX_ITERATIONS
 
         feature_list = self.progress_manager.load_feature_list(force_reload=True)
         if feature_list is None:
-            return {"success": False, "error": "未找到 feature_list.json，请先执行 init"}
+            payload = {"success": False, "error": "未找到 feature_list.json，请先执行 init"}
+            emit_event(
+                event_type="session_end",
+                component="agent",
+                name="run",
+                payload={"message": payload["error"]},
+                ok=False,
+                iteration=self._iteration_count,
+                phase="run",
+            )
+            return payload
 
         precheck_result = self._run_session_precheck()
         if not precheck_result.get("ok"):
@@ -491,14 +747,43 @@ echo \"[init.sh] 初始化检查通过\"
                     "payload": payload,
                 }
             )
+            emit_event(
+                event_type="session_end",
+                component="agent",
+                name="run",
+                payload={"message": payload["error"], "status": payload["status"]},
+                ok=False,
+                iteration=self._iteration_count,
+                phase="run",
+            )
             return payload
 
         next_feature = self.progress_manager.get_next_feature()
         if next_feature is None:
             stats = self.progress_manager.get_progress_stats()
             if stats.get("completion_rate") == 100:
-                return {"success": True, "message": "所有功能已完成"}
-            return {"success": False, "error": "没有可执行的功能（可能被依赖阻塞）"}
+                payload = {"success": True, "message": "所有功能已完成"}
+                emit_event(
+                    event_type="session_end",
+                    component="agent",
+                    name="run",
+                    payload={"message": payload["message"]},
+                    ok=True,
+                    iteration=self._iteration_count,
+                    phase="run",
+                )
+                return payload
+            payload = {"success": False, "error": "没有可执行的功能（可能被依赖阻塞）"}
+            emit_event(
+                event_type="session_end",
+                component="agent",
+                name="run",
+                payload={"message": payload["error"]},
+                ok=False,
+                iteration=self._iteration_count,
+                phase="run",
+            )
+            return payload
 
         self.progress_manager.update_feature_status(next_feature.id, "in_progress")
 
@@ -600,6 +885,15 @@ echo \"[init.sh] 初始化检查通过\"
 
             if on_iteration is not None:
                 on_iteration(self._iteration_count, payload)
+            emit_event(
+                event_type="session_end",
+                component="agent",
+                name="run",
+                payload={"message": "单次运行结束", "status": payload["status"]},
+                ok=payload["success"],
+                iteration=self._iteration_count,
+                phase="run",
+            )
             return payload
 
         except Exception as exc:
@@ -621,6 +915,24 @@ echo \"[init.sh] 初始化检查通过\"
                     "event": "run_exception",
                     "payload": payload,
                 }
+            )
+            emit_event(
+                event_type="error",
+                component="agent",
+                name="run",
+                payload={"message": str(exc)},
+                ok=False,
+                iteration=self._iteration_count,
+                phase="run",
+            )
+            emit_event(
+                event_type="session_end",
+                component="agent",
+                name="run",
+                payload={"message": f"运行异常: {exc}", "status": payload["status"]},
+                ok=False,
+                iteration=self._iteration_count,
+                phase="run",
             )
             return payload
 

@@ -20,13 +20,15 @@ import os
 import subprocess
 import shlex
 import re
+import time
 import glob as glob_module
-from typing import Optional, List
-from langchain_core.tools import tool
+from typing import Optional, List, Any, Tuple, Dict
+from langchain_core.tools import tool, StructuredTool
 
 # 导入安全模块和配置
 from .security import get_validator
 from config import get_project_dir, Config
+from .event_logger import emit_event
 
 
 # ============================================
@@ -476,6 +478,134 @@ def _is_compound_shell_command(command: str) -> bool:
     return bool(re.search(r'&&|\|\||;|\|', command))
 
 
+def _classify_tool_result(result_text: str) -> Tuple[bool, str]:
+    """
+    根据工具返回文本判断执行状态
+
+    参数:
+        result_text: 工具返回的文本
+
+    返回:
+        Tuple[bool, str]: (是否成功, 状态码字符串)
+    """
+    text = str(result_text or "")
+    if "命令被拒绝" in text:
+        return False, "blocked"
+    if text.startswith("错误") or "发生错误" in text:
+        return False, "error"
+    return True, "done"
+
+
+def _wrap_tool_invoke(tool_obj: Any) -> Any:
+    """
+    为 LangChain 工具对象包装 invoke 日志
+
+    参数:
+        tool_obj: 由 @tool 生成的工具对象
+
+    返回:
+        Any: 包装后的工具对象
+    """
+    cache_key = f"{getattr(tool_obj, 'name', 'unknown')}::{id(tool_obj)}"
+    cached_tool = _WRAPPED_TOOL_CACHE.get(cache_key)
+    if cached_tool is not None:
+        return cached_tool
+
+    original_func = getattr(tool_obj, "func", None)
+    if original_func is None:
+        return tool_obj
+
+    def logged_func(*args, **kwargs):
+        """
+        包装后的工具调用方法
+
+        参数:
+            *args: 位置参数
+            **kwargs: 关键字参数
+
+        返回:
+            Any: 原始工具调用结果
+        """
+        start_time = time.time()
+        if kwargs:
+            input_preview = str(kwargs)
+        else:
+            input_preview = str(args)
+        emit_event(
+            event_type="tool_use",
+            component="tool",
+            name=tool_obj.name,
+            payload={"tool_name": tool_obj.name, "input_preview": input_preview},
+            ok=True,
+            phase="run",
+        )
+
+        try:
+            result = original_func(*args, **kwargs)
+        except Exception as exc:
+            duration = round(time.time() - start_time, 3)
+            emit_event(
+                event_type="tool_result",
+                component="tool",
+                name=tool_obj.name,
+                payload={
+                    "status": "error",
+                    "returncode": 1,
+                    "duration_sec": duration,
+                    "stderr_preview": str(exc),
+                },
+                ok=False,
+                phase="run",
+            )
+            raise
+
+        duration = round(time.time() - start_time, 3)
+        success, status = _classify_tool_result(str(result))
+        emit_event(
+            event_type="tool_result",
+            component="tool",
+            name=tool_obj.name,
+            payload={
+                "status": status,
+                "returncode": 0 if success else 1,
+                "duration_sec": duration,
+                "stdout_preview": str(result),
+            },
+            ok=success,
+            phase="run",
+        )
+        return result
+
+    logged_tool = StructuredTool.from_function(
+        func=logged_func,
+        name=tool_obj.name,
+        description=tool_obj.description,
+        return_direct=tool_obj.return_direct,
+        args_schema=getattr(tool_obj, "args_schema", None),
+        infer_schema=False,
+        response_format=getattr(tool_obj, "response_format", "content"),
+    )
+    _WRAPPED_TOOL_CACHE[cache_key] = logged_tool
+    return logged_tool
+
+
+def _get_wrapped_tools(tool_list: List[Any]) -> List[Any]:
+    """
+    为工具列表批量挂载事件日志包装器
+
+    参数:
+        tool_list: 原始工具列表
+
+    返回:
+        List[Any]: 包装后的工具列表
+    """
+    return [_wrap_tool_invoke(tool_obj) for tool_obj in tool_list]
+
+
+# 工具包装缓存
+_WRAPPED_TOOL_CACHE: Dict[str, Any] = {}
+
+
 @tool
 def run_bash(command: str, timeout: int = 60) -> str:
     """
@@ -569,7 +699,7 @@ def get_all_tools() -> List:
         包括：read_file, write_file, edit_file, list_files,
              create_directory, delete_file, search_code, run_bash
     """
-    return [
+    return _get_wrapped_tools([
         read_file,
         write_file,
         edit_file,
@@ -578,7 +708,7 @@ def get_all_tools() -> List:
         delete_file,
         search_code,
         run_bash,
-    ]
+    ])
 
 
 def get_file_tools() -> List:
@@ -592,14 +722,14 @@ def get_file_tools() -> List:
         只返回文件操作相关的工具，
         不包括命令执行工具。
     """
-    return [
+    return _get_wrapped_tools([
         read_file,
         write_file,
         edit_file,
         list_files,
         create_directory,
         delete_file,
-    ]
+    ])
 
 
 def get_safe_tools() -> List:
@@ -613,7 +743,7 @@ def get_safe_tools() -> List:
         返回不包括 Bash 命令执行的工具，
         适用于需要更高安全性的场景。
     """
-    return [
+    return _get_wrapped_tools([
         read_file,
         write_file,
         edit_file,
@@ -621,7 +751,7 @@ def get_safe_tools() -> List:
         create_directory,
         delete_file,
         search_code,
-    ]
+    ])
 
 
 # ============================================
