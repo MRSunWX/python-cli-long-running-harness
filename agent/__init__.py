@@ -29,6 +29,7 @@ from . import progress
 from . import security
 from . import prompts
 from . import git_helper
+from . import event_logger
 
 # 定义公开接口
 # 当使用 from agent import * 时，只会导入这些名称
@@ -39,6 +40,7 @@ __all__ = [
     "security",      # 安全控制模块
     "prompts",       # 提示词模块
     "git_helper",    # Git 辅助模块
+    "event_logger",  # 事件日志模块
 ]
 
 # 版本信息

@@ -102,8 +102,17 @@ class Config:
     # 迭代运行日志文件名
     RUN_LOG_FILE: str = "run_logs.jsonl"
 
+    # 事件日志文件名（终端事件的结构化落盘）
+    EVENT_LOG_FILE: str = "events.jsonl"
+
     # 会话前检查脚本文件名
     INIT_SCRIPT_NAME: str = "init.sh"
+
+    # 事件日志默认开关（True 表示默认输出详细事件）
+    VERBOSE_EVENTS_DEFAULT: bool = True
+
+    # 事件日志文本预览长度
+    EVENT_PREVIEW_LENGTH: int = 300
 
 
 # 创建全局配置实例

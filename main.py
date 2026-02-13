@@ -24,6 +24,7 @@
 import os
 import sys
 import click
+from datetime import datetime
 from typing import Optional
 
 # 确保项目根目录在 Python 路径中
@@ -33,6 +34,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config import Config, set_project_dir
 from agent import CodingAgent
 from agent.progress import ProgressManager
+from agent.event_logger import setup_event_logger, emit_event
 
 # 尝试导入 rich 进行美化输出
 try:
@@ -57,8 +59,13 @@ if RICH_AVAILABLE:
 @click.option('--model', default=None, help='模型名称（默认从配置读取）')
 @click.option('--url', default=None, help='Ollama API 地址')
 @click.option('--verbose', '-v', is_flag=True, help='显示详细输出')
+@click.option(
+    '--verbose-events/--quiet-events',
+    default=Config.VERBOSE_EVENTS_DEFAULT,
+    help='是否输出详细事件日志（默认开启）'
+)
 @click.pass_context
-def cli(ctx, model, url, verbose):
+def cli(ctx, model, url, verbose, verbose_events):
     """
     自主编程助手 Agent
 
@@ -81,6 +88,66 @@ def cli(ctx, model, url, verbose):
     ctx.obj['model'] = model or Config.MODEL_NAME
     ctx.obj['url'] = url or Config.OLLAMA_BASE_URL
     ctx.obj['verbose'] = verbose
+    ctx.obj['verbose_events'] = verbose_events
+
+
+def _build_session_id(command_name: str) -> str:
+    """
+    生成命令级会话 ID
+
+    参数:
+        command_name: 命令名称（如 init/run）
+
+    返回:
+        str: 格式化的会话 ID
+    """
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    return f"{command_name}-{timestamp}"
+
+
+def _start_command_event_log(command_name: str, project_dir: str, verbose_events: bool) -> None:
+    """
+    初始化命令事件日志并发送会话开始事件
+
+    参数:
+        command_name: 命令名称
+        project_dir: 项目目录
+        verbose_events: 是否输出详细事件日志
+    """
+    setup_event_logger(
+        project_dir=project_dir,
+        verbose_events=verbose_events,
+        persist_file=True,
+        phase=command_name,
+        session_id=_build_session_id(command_name)
+    )
+    emit_event(
+        event_type="session_start",
+        component="cli",
+        name=command_name,
+        payload={"message": f"开始执行命令: {command_name}", "project_dir": project_dir},
+        ok=True,
+        phase=command_name
+    )
+
+
+def _end_command_event_log(command_name: str, success: bool, summary: str) -> None:
+    """
+    发送命令会话结束事件
+
+    参数:
+        command_name: 命令名称
+        success: 命令是否成功
+        summary: 结果摘要
+    """
+    emit_event(
+        event_type="session_end",
+        component="cli",
+        name=command_name,
+        payload={"message": summary, "summary": summary},
+        ok=success,
+        phase=command_name
+    )
 
 
 # ============================================
@@ -107,6 +174,9 @@ def init(ctx, project_dir, spec, name, template):
     model = ctx.obj['model']
     url = ctx.obj['url']
     verbose = ctx.obj['verbose']
+    verbose_events = ctx.obj['verbose_events']
+
+    _start_command_event_log("init", project_dir, verbose_events)
 
     # 打印标题
     if RICH_AVAILABLE:
@@ -170,11 +240,13 @@ def init(ctx, project_dir, spec, name, template):
         else:
             print("\n✓ 项目初始化完成！")
             print(f"\n下一步: python main.py run {project_dir}")
+        _end_command_event_log("init", True, "项目初始化完成")
     else:
         if RICH_AVAILABLE:
             console.print("\n[red]✗ 项目初始化失败[/red]")
         else:
             print("\n✗ 项目初始化失败")
+        _end_command_event_log("init", False, "项目初始化失败")
         sys.exit(1)
 
 
@@ -203,6 +275,9 @@ def run(ctx, project_dir, iterations, continuous, task):
     model = ctx.obj['model']
     url = ctx.obj['url']
     verbose = ctx.obj['verbose']
+    verbose_events = ctx.obj['verbose_events']
+
+    _start_command_event_log("run", project_dir, verbose_events)
 
     # 打印标题
     if RICH_AVAILABLE:
@@ -254,10 +329,12 @@ def run(ctx, project_dir, iterations, continuous, task):
             console.print(f"\n[green]完成的功能: {len(result['completed_features'])}[/green]")
             if result['failed_features']:
                 console.print(f"[red]失败的功能: {len(result['failed_features'])}[/red]")
+            _end_command_event_log("run", True, "连续运行结束")
         else:
             print(f"\n完成的功能: {len(result['completed_features'])}")
             if result['failed_features']:
                 print(f"失败的功能: {len(result['failed_features'])}")
+            _end_command_event_log("run", True, "连续运行结束")
     else:
         # 单次运行
         result = agent.run(max_iterations=iterations)
@@ -271,11 +348,13 @@ def run(ctx, project_dir, iterations, continuous, task):
                 print(f"\n✓ 任务完成")
                 if result.get('feature_id'):
                     print(f"功能: {result['feature_id']}")
+            _end_command_event_log("run", True, "单次运行成功")
         else:
             if RICH_AVAILABLE:
                 console.print(f"\n[red]✗ 任务失败: {result.get('error', '未知错误')}[/red]")
             else:
                 print(f"\n✗ 任务失败: {result.get('error', '未知错误')}")
+            _end_command_event_log("run", False, f"单次运行失败: {result.get('error', '未知错误')}")
 
 
 # ============================================
@@ -311,6 +390,7 @@ def status_cmd(ctx, project_dir, output_json):
             "stats": stats
         }
         print(json.dumps(output, indent=2, ensure_ascii=False))
+        _end_command_event_log("status", True, "状态查询完成（JSON）")
         return
 
     # 美化输出
@@ -383,6 +463,8 @@ def status_cmd(ctx, project_dir, output_json):
             for feature in feature_list.features:
                 print(f"  [{feature.id}] {feature.name} - {feature.status}")
 
+    _end_command_event_log("status", True, "状态查询完成")
+
 
 # ============================================
 # chat 命令 - 交互式对话
@@ -403,6 +485,9 @@ def chat(ctx, project_dir):
     """
     model = ctx.obj['model']
     url = ctx.obj['url']
+    verbose_events = ctx.obj['verbose_events']
+
+    _start_command_event_log("chat", project_dir, verbose_events)
 
     # 打印标题
     if RICH_AVAILABLE:
@@ -449,6 +534,7 @@ def chat(ctx, project_dir):
                     console.print("[dim]再见！[/dim]")
                 else:
                     print("再见！")
+                _end_command_event_log("chat", True, "聊天会话正常结束")
                 break
 
             # 跳过空输入
@@ -481,12 +567,21 @@ def chat(ctx, project_dir):
                 console.print("\n[dim]已中断[/dim]")
             else:
                 print("\n已中断")
+            _end_command_event_log("chat", True, "聊天会话被用户中断")
             break
         except Exception as e:
             if RICH_AVAILABLE:
                 console.print(f"[red]错误: {str(e)}[/red]")
             else:
                 print(f"错误: {str(e)}")
+            emit_event(
+                event_type="error",
+                component="cli",
+                name="chat",
+                payload={"message": str(e)},
+                ok=False,
+                phase="chat"
+            )
 
 
 # ============================================
@@ -527,11 +622,13 @@ def add_feature(ctx, project_dir, feature_id, name, desc, priority, verify_comma
             console.print(f"[green]✓ 功能 '{name}' 已添加[/green]")
         else:
             print(f"✓ 功能 '{name}' 已添加")
+        _end_command_event_log("add-feature", True, f"功能已添加: {feature_id}")
     else:
         if RICH_AVAILABLE:
             console.print(f"[red]✗ 添加功能失败[/red]")
         else:
             print("✗ 添加功能失败")
+        _end_command_event_log("add-feature", False, f"功能添加失败: {feature_id}")
 
 
 # ============================================
@@ -552,3 +649,5 @@ if __name__ == '__main__':
         else:
             print(f"错误: {str(e)}")
         sys.exit(1)
+    _start_command_event_log("status", project_dir, ctx.obj['verbose_events'])
+    _start_command_event_log("add-feature", project_dir, ctx.obj['verbose_events'])
