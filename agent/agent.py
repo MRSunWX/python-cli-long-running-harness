@@ -1373,12 +1373,6 @@ echo \"[init.sh] 初始化检查通过\"
         }
 
         for iteration_index in range(max_total_iterations):
-            # 每轮先强制刷新一次 feature_list，避免读取到当前实例缓存的旧状态
-            self.progress_manager.load_feature_list(force_reload=True)
-            next_feature = self.progress_manager.get_next_feature()
-            if next_feature is None:
-                break
-
             # 对齐 quickstart：每轮都创建全新的 Agent 实例，确保 fresh context
             session_agent = CodingAgent(
                 project_dir=self.project_dir,
@@ -1389,11 +1383,22 @@ echo \"[init.sh] 初始化检查通过\"
             result = session_agent.run(max_iterations=Config.MAX_ITERATIONS)
             results["total_iterations"] += 1
 
-            feature_id = result.get("feature_id") or next_feature.id
-            if result.get("success"):
+            feature_id = result.get("feature_id") or ""
+            if result.get("success") and feature_id:
                 results["completed_features"].append(feature_id)
-            else:
+            elif (not result.get("success")) and feature_id:
                 results["failed_features"].append(feature_id)
+
+            stop_reason = ""
+            # 所有功能完成：正常结束连续模式
+            if result.get("success") and result.get("message") == "所有功能已完成":
+                stop_reason = "all_completed"
+            # 没有可执行功能（依赖阻塞/冷却中等）：结束连续模式
+            elif (not result.get("success")) and "没有可执行的功能" in str(result.get("error", "")):
+                stop_reason = "no_executable_feature"
+            # 首轮初始化失败等不可恢复错误：结束连续模式
+            elif (not result.get("success")) and (not feature_id) and result.get("error"):
+                stop_reason = "fatal_error"
 
             emit_event(
                 event_type="session_end",
@@ -1401,14 +1406,18 @@ echo \"[init.sh] 初始化检查通过\"
                 name="run_continuous_iteration",
                 payload={
                     "iteration_index": iteration_index + 1,
-                    "feature_id": feature_id,
+                    "feature_id": feature_id or None,
                     "success": bool(result.get("success")),
                     "status": result.get("status", "unknown"),
                     "next_sleep_sec": effective_pause,
+                    "stop_reason": stop_reason or None,
                 },
                 ok=bool(result.get("success")),
                 phase="run",
             )
+
+            if stop_reason:
+                break
 
             if effective_pause > 0:
                 time.sleep(effective_pause)
