@@ -10,6 +10,7 @@
 - `status`：查看项目统计信息和功能状态。
 - `chat`：与 Agent 进行交互式对话。
 - `add-feature`：手动向功能列表添加新功能。
+- `add-feature --verify`：为功能设置一个或多个验收命令（测试门禁）。
 
 ## 项目结构
 
@@ -62,7 +63,17 @@ python main.py chat ./demo_project
 
 # 添加功能
 python main.py add-feature ./demo_project --id feat-002 --name "用户登录" --priority high
+
+# 添加功能并设置验收命令（可重复 --verify）
+python main.py add-feature ./demo_project --id feat-003 --name "导出报告" --verify "python -m pytest -q"
 ```
+
+## 强化机制
+
+- 会话前检查：每轮 `run` 前会先执行项目内 `init.sh`（存在时）。
+- 测试门禁：只有功能的验收命令全部通过，状态才会变为 `completed`。
+- 运行日志：每轮执行会写入 `run_logs.jsonl`，用于复盘。
+- 降级初始化：模型不可达时仍可完成本地初始化，不阻断项目启动。
 
 ## 测试与校验
 

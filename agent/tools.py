@@ -18,12 +18,14 @@
 
 import os
 import subprocess
+import shlex
+import re
 import glob as glob_module
 from typing import Optional, List
 from langchain_core.tools import tool
 
 # 导入安全模块和配置
-from .security import validate_command, is_command_safe
+from .security import get_validator
 from config import get_project_dir, Config
 
 
@@ -461,6 +463,19 @@ def search_code(query: str, directory: str = ".", file_pattern: str = "*") -> st
 # Bash 命令执行工具
 # ============================================
 
+def _is_compound_shell_command(command: str) -> bool:
+    """
+    判断命令是否为复合 Shell 命令。
+
+    参数:
+        command: 原始命令字符串
+
+    返回:
+        bool: 如果包含控制符（如 &&、||、;、|）则返回 True
+    """
+    return bool(re.search(r'&&|\|\||;|\|', command))
+
+
 @tool
 def run_bash(command: str, timeout: int = 60) -> str:
     """
@@ -484,22 +499,35 @@ def run_bash(command: str, timeout: int = 60) -> str:
         result = run_bash("python test.py", timeout=120)
     """
     try:
-        # 安全验证
-        is_safe, reason = is_command_safe(command)
-        if not is_safe:
-            return f"命令被拒绝: {reason}"
+        # 安全验证（支持复合命令逐段校验）
+        validator = get_validator()
+        check_result = validator.validate_with_compound_handling(command)
+        if not check_result.allowed:
+            return f"命令被拒绝: {check_result.reason}"
 
         # 获取工作目录
         work_dir = get_project_dir()
 
-        # 执行命令
+        # 执行命令（默认使用 shell=False，避免直接注入风险）
+        if _is_compound_shell_command(command):
+            # 复合命令在通过验证后，交由 bash -lc 解释执行
+            exec_args = ["bash", "-lc", command]
+            execution_mode = "复合命令模式"
+        else:
+            # 单命令模式通过 shlex 安全拆分参数
+            exec_args = shlex.split(command)
+            execution_mode = "单命令模式"
+
+        if not exec_args:
+            return "错误: 命令为空，无法执行"
+
         result = subprocess.run(
-            command,
-            shell=True,
+            exec_args,
+            shell=False,
             capture_output=True,
             text=True,
             cwd=work_dir,
-            timeout=timeout
+            timeout=timeout or Config.COMMAND_TIMEOUT
         )
 
         # 组合输出
@@ -512,6 +540,7 @@ def run_bash(command: str, timeout: int = 60) -> str:
             output_parts.append(f"标准错误:\n{result.stderr}")
 
         # 添加返回码信息
+        output_parts.append(f"执行模式: {execution_mode}")
         output_parts.append(f"返回码: {result.returncode}")
 
         return "\n\n".join(output_parts)

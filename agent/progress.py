@@ -43,6 +43,7 @@ class Feature:
         description: 功能详细描述
         acceptance_criteria: 验收标准列表（用于自验证）
         test_command: 测试命令（用于验证功能）
+        verify_commands: 验收命令列表（支持多个命令按顺序执行）
         priority: 优先级（high/medium/low）
         status: 状态（pending/in_progress/completed/blocked）
         dependencies: 依赖的其他功能 ID 列表
@@ -55,6 +56,7 @@ class Feature:
     description: str = ""
     acceptance_criteria: List[str] = None  # 验收标准
     test_command: str = ""  # 测试命令
+    verify_commands: List[str] = None  # 验收命令列表
     priority: str = "medium"
     status: str = "pending"
     dependencies: List[str] = None
@@ -76,6 +78,11 @@ class Feature:
             self.dependencies = []
         if self.acceptance_criteria is None:
             self.acceptance_criteria = []
+        if self.verify_commands is None:
+            self.verify_commands = []
+        # 兼容旧字段：如果未提供 verify_commands，但有 test_command，则自动补齐
+        if not self.verify_commands and self.test_command:
+            self.verify_commands = [self.test_command]
 
     def to_dict(self) -> Dict[str, Any]:
         """
@@ -106,6 +113,7 @@ class Feature:
             description=data.get("description", ""),
             acceptance_criteria=data.get("acceptance_criteria", []),
             test_command=data.get("test_command", ""),
+            verify_commands=data.get("verify_commands", []),
             priority=data.get("priority", "medium"),
             status=data.get("status", "pending"),
             dependencies=data.get("dependencies", []),
@@ -443,7 +451,8 @@ class ProgressManager:
         name: str,
         description: str = "",
         priority: str = "medium",
-        dependencies: List[str] = None
+        dependencies: List[str] = None,
+        verify_commands: List[str] = None
     ) -> bool:
         """
         添加新功能
@@ -454,6 +463,7 @@ class ProgressManager:
             description: 功能描述
             priority: 优先级（high/medium/low）
             dependencies: 依赖的其他功能 ID 列表
+            verify_commands: 验收命令列表（可选）
 
         返回:
             bool: 是否成功添加
@@ -477,7 +487,8 @@ class ProgressManager:
                 name=name,
                 description=description,
                 priority=priority,
-                dependencies=dependencies or []
+                dependencies=dependencies or [],
+                verify_commands=verify_commands or []
             )
 
             feature_list.features.append(new_feature)

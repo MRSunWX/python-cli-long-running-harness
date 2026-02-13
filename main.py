@@ -499,8 +499,9 @@ def chat(ctx, project_dir):
 @click.option('--name', '-n', required=True, help='功能名称')
 @click.option('--desc', '-d', default='', help='功能描述')
 @click.option('--priority', '-p', default='medium', type=click.Choice(['high', 'medium', 'low']), help='优先级')
+@click.option('--verify', 'verify_commands', multiple=True, help='验收命令（可多次传入）')
 @click.pass_context
-def add_feature(ctx, project_dir, feature_id, name, desc, priority):
+def add_feature(ctx, project_dir, feature_id, name, desc, priority, verify_commands):
     """
     添加新功能到项目
 
@@ -509,6 +510,7 @@ def add_feature(ctx, project_dir, feature_id, name, desc, priority):
     \b
     示例:
       python main.py add-feature ./my_app --id feat-005 --name "用户登录" --priority high
+      python main.py add-feature ./my_app --id feat-006 --name "导出报告" --verify "python -m pytest -q"
     """
     progress_manager = ProgressManager(project_dir)
 
@@ -516,7 +518,8 @@ def add_feature(ctx, project_dir, feature_id, name, desc, priority):
         feature_id=feature_id,
         name=name,
         description=desc,
-        priority=priority
+        priority=priority,
+        verify_commands=list(verify_commands) if verify_commands else None
     )
 
     if success:

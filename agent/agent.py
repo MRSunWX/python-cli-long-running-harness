@@ -13,7 +13,10 @@ Agent 核心模块 (agent.py)
 - 如果 LangGraph 不可用或初始化失败，自动回退到简单执行器
 """
 
+import json
 import os
+import shlex
+import subprocess
 import sys
 import time
 from datetime import datetime
@@ -35,6 +38,7 @@ from config import Config, set_project_dir
 from .git_helper import GitHelper, format_commits_for_prompt
 from .progress import Feature, ProgressManager
 from .prompts import get_system_prompt, loader as prompt_loader
+from .security import get_validator
 from .tools import get_all_tools
 
 
@@ -97,6 +101,11 @@ class SimpleAgentExecutor:
         return {"output": str(content)}
 
 
+def _is_compound_shell_command(command: str) -> bool:
+    """判断命令是否包含复合控制符（&&、||、;、|）。"""
+    return any(token in command for token in ["&&", "||", ";", "|"])
+
+
 class CodingAgent:
     """
     自主编程 Agent 主类。
@@ -105,7 +114,8 @@ class CodingAgent:
     - 初始化模型、工具、进度和 Git 管理器
     - 初始化项目上下文
     - 按功能粒度执行任务
-    - 提供状态查询与对话能力
+    - 通过测试门禁决定功能完成状态
+    - 记录迭代运行日志
     """
 
     def __init__(
@@ -200,6 +210,189 @@ class CodingAgent:
 
         return str(result)
 
+    @staticmethod
+    def _truncate_text(text: str, max_len: int = 2000) -> str:
+        """截断过长文本，避免日志体积过大。"""
+        if len(text) <= max_len:
+            return text
+        return text[:max_len] + "\n...(已截断)"
+
+    @property
+    def _run_log_path(self) -> str:
+        """获取迭代日志文件路径。"""
+        return os.path.join(self.project_dir, Config.RUN_LOG_FILE)
+
+    def _append_run_log(self, record: Dict[str, Any]) -> None:
+        """将一次迭代记录追加写入 JSONL 日志文件。"""
+        try:
+            with open(self._run_log_path, "a", encoding="utf-8") as file_obj:
+                file_obj.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except Exception:
+            # 日志写入失败不应阻断主流程
+            pass
+
+    def _execute_validated_command(self, command: str, timeout: int) -> Dict[str, Any]:
+        """执行经过安全校验的命令并返回结构化结果。"""
+        validator = get_validator()
+        check_result = validator.validate_with_compound_handling(command)
+        if not check_result.allowed:
+            return {
+                "ok": False,
+                "command": command,
+                "returncode": 126,
+                "stdout": "",
+                "stderr": check_result.reason,
+                "mode": "rejected",
+                "duration_sec": 0.0,
+            }
+
+        start_time = time.time()
+        try:
+            if _is_compound_shell_command(command):
+                # 复合命令使用 bash -lc 解释执行，但不启用 shell=True
+                exec_args = ["bash", "-lc", command]
+                mode = "compound"
+            else:
+                # 单命令模式使用 shlex 拆分参数，避免注入风险
+                exec_args = shlex.split(command)
+                mode = "single"
+
+            if not exec_args:
+                return {
+                    "ok": False,
+                    "command": command,
+                    "returncode": 2,
+                    "stdout": "",
+                    "stderr": "命令为空",
+                    "mode": "invalid",
+                    "duration_sec": round(time.time() - start_time, 3),
+                }
+
+            completed = subprocess.run(
+                exec_args,
+                shell=False,
+                cwd=self.project_dir,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+
+            return {
+                "ok": completed.returncode == 0,
+                "command": command,
+                "returncode": completed.returncode,
+                "stdout": completed.stdout,
+                "stderr": completed.stderr,
+                "mode": mode,
+                "duration_sec": round(time.time() - start_time, 3),
+            }
+
+        except subprocess.TimeoutExpired:
+            return {
+                "ok": False,
+                "command": command,
+                "returncode": 124,
+                "stdout": "",
+                "stderr": f"命令执行超时（{timeout}秒）",
+                "mode": "timeout",
+                "duration_sec": round(time.time() - start_time, 3),
+            }
+        except ValueError as exc:
+            return {
+                "ok": False,
+                "command": command,
+                "returncode": 2,
+                "stdout": "",
+                "stderr": f"命令解析失败: {exc}",
+                "mode": "invalid",
+                "duration_sec": round(time.time() - start_time, 3),
+            }
+        except Exception as exc:
+            return {
+                "ok": False,
+                "command": command,
+                "returncode": 1,
+                "stdout": "",
+                "stderr": str(exc),
+                "mode": "error",
+                "duration_sec": round(time.time() - start_time, 3),
+            }
+
+    def _ensure_init_script(self) -> None:
+        """确保项目目录存在最小可用的 init.sh 脚本。"""
+        init_path = os.path.join(self.project_dir, Config.INIT_SCRIPT_NAME)
+        if os.path.exists(init_path):
+            return
+
+        init_content = """#!/usr/bin/env bash
+# 最小初始化脚本：用于会话前健康检查
+set -e
+
+# 可在此添加依赖安装、环境检查等步骤
+echo \"[init.sh] 初始化检查通过\"
+"""
+        with open(init_path, "w", encoding="utf-8") as file_obj:
+            file_obj.write(init_content)
+        os.chmod(init_path, 0o755)
+
+    def _run_session_precheck(self) -> Dict[str, Any]:
+        """执行会话前检查（优先运行 init.sh）。"""
+        init_path = os.path.join(self.project_dir, Config.INIT_SCRIPT_NAME)
+        if not os.path.exists(init_path):
+            return {
+                "ok": True,
+                "skipped": True,
+                "message": f"未找到 {Config.INIT_SCRIPT_NAME}，跳过会话前检查",
+            }
+
+        result = self._execute_validated_command(
+            command=f"bash ./{Config.INIT_SCRIPT_NAME}",
+            timeout=Config.SESSION_PRECHECK_TIMEOUT,
+        )
+        result["skipped"] = False
+        return result
+
+    @staticmethod
+    def _get_feature_verify_commands(feature: Feature) -> List[str]:
+        """获取功能的验收命令列表，兼容旧的 test_command 字段。"""
+        if getattr(feature, "verify_commands", None):
+            return [cmd.strip() for cmd in feature.verify_commands if cmd.strip()]
+
+        if feature.test_command:
+            return [line.strip() for line in feature.test_command.splitlines() if line.strip()]
+
+        return []
+
+    def _run_feature_verification(self, feature: Feature) -> Dict[str, Any]:
+        """执行功能验收命令并返回验证结果。"""
+        commands = self._get_feature_verify_commands(feature)
+        if not commands:
+            return {
+                "passed": False,
+                "reason": "未配置验收命令，无法自动标记完成",
+                "results": [],
+            }
+
+        command_results: List[Dict[str, Any]] = []
+        for command in commands:
+            result = self._execute_validated_command(
+                command=command,
+                timeout=Config.VERIFICATION_TIMEOUT,
+            )
+            command_results.append(result)
+            if not result.get("ok"):
+                return {
+                    "passed": False,
+                    "reason": f"验收失败: {command}",
+                    "results": command_results,
+                }
+
+        return {
+            "passed": True,
+            "reason": "所有验收命令通过",
+            "results": command_results,
+        }
+
     def _invoke_agent(self, prompt: str, chat_history: Optional[List[Any]] = None) -> Dict[str, Any]:
         """统一封装 Agent 调用，优先 LangGraph，失败回退到简易执行器。"""
         history = chat_history or []
@@ -215,12 +408,10 @@ class CodingAgent:
             except Exception:
                 self._use_langgraph = False
 
-        return self._fallback_executor.invoke(
-            {"input": prompt, "chat_history": history}
-        )
+        return self._fallback_executor.invoke({"input": prompt, "chat_history": history})
 
     def initialize(self, requirements: str, project_name: Optional[str] = None) -> bool:
-        """初始化项目进度文件、基础功能和初始 Git 提交。"""
+        """初始化项目进度文件、基础结构和初始 Git 提交。"""
         if project_name is None:
             project_name = os.path.basename(self.project_dir)
 
@@ -236,19 +427,29 @@ class CodingAgent:
                     name="项目初始化与基础结构",
                     description=requirements,
                     priority="high",
+                    verify_commands=["ls -la"],
                 )
 
-            init_prompt = prompt_loader.get_initializer_prompt(
-                requirements=requirements,
-                project_name=project_name,
-                project_dir=self.project_dir,
-                current_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            )
-            init_result = self._invoke_agent(init_prompt, [])
-            init_output = init_result.get("output", "").strip()
-            if init_output:
+            # 无论模型是否可用，都先确保 init.sh 存在，保证后续 run 可执行
+            self._ensure_init_script()
+
+            # 初始化分析阶段：模型失败时降级为提示信息，不阻断初始化成功
+            try:
+                init_prompt = prompt_loader.get_initializer_prompt(
+                    requirements=requirements,
+                    project_name=project_name,
+                    project_dir=self.project_dir,
+                    current_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                )
+                init_result = self._invoke_agent(init_prompt, [])
+                init_output = init_result.get("output", "").strip()
+                if init_output:
+                    self.progress_manager.append_to_progress("## 初始化分析\n\n" + init_output)
+            except Exception as exc:
                 self.progress_manager.append_to_progress(
-                    "## 初始化分析\n\n" + init_output
+                    "## 初始化分析\n\n"
+                    f"- 模型初始化分析失败，已降级继续。\n"
+                    f"- 原因: {exc}"
                 )
 
             if not self.git_helper.is_repo():
@@ -274,6 +475,24 @@ class CodingAgent:
         if feature_list is None:
             return {"success": False, "error": "未找到 feature_list.json，请先执行 init"}
 
+        precheck_result = self._run_session_precheck()
+        if not precheck_result.get("ok"):
+            payload = {
+                "success": False,
+                "error": f"会话前检查失败: {precheck_result.get('stderr', '')}",
+                "status": "blocked",
+                "precheck": precheck_result,
+            }
+            self._append_run_log(
+                {
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "iteration": self._iteration_count,
+                    "event": "session_precheck_failed",
+                    "payload": payload,
+                }
+            )
+            return payload
+
         next_feature = self.progress_manager.get_next_feature()
         if next_feature is None:
             stats = self.progress_manager.get_progress_stats()
@@ -285,7 +504,7 @@ class CodingAgent:
 
         progress_content = self.progress_manager.load_progress() or ""
         git_history = format_commits_for_prompt(self.git_helper.get_recent_commits(5))
-        init_sh_path = os.path.join(self.project_dir, "init.sh")
+        init_sh_path = os.path.join(self.project_dir, Config.INIT_SCRIPT_NAME)
         init_sh_content = ""
         if os.path.exists(init_sh_path):
             try:
@@ -299,6 +518,7 @@ class CodingAgent:
             git_history=git_history,
             init_sh=init_sh_content,
             feature_list=feature_list,
+            precheck_result=precheck_result,
         )
         task_prompt = prompt_loader.get_coding_prompt(
             progress_summary=session_context,
@@ -311,38 +531,47 @@ class CodingAgent:
             result = self._invoke_agent(task_prompt, [])
             output_text = result.get("output", "")
 
-            completion_keywords = ["完成", "completed", "done", "finished", "成功"]
-            lowered = output_text.lower()
-            is_completed = any(word in lowered for word in completion_keywords)
-            if not output_text.strip():
-                is_completed = False
+            # 关键门禁：只有验收命令全部通过才标记 completed
+            verification = self._run_feature_verification(next_feature)
+            is_completed = verification.get("passed", False)
 
             now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             if is_completed:
                 self.progress_manager.update_feature_status(
                     next_feature.id,
                     "completed",
-                    f"完成于 {now_str}",
+                    f"完成于 {now_str}；{verification.get('reason', '')}",
                 )
                 summary_title = "## 功能执行记录（完成）"
             else:
                 self.progress_manager.update_feature_status(
                     next_feature.id,
                     "in_progress",
-                    f"会话结束于 {now_str}，需要继续执行",
+                    f"会话结束于 {now_str}；{verification.get('reason', '验收未通过')}",
                 )
                 summary_title = "## 功能执行记录（进行中）"
 
-            if output_text.strip():
+            verification_lines = ["### 验收结果", f"- 结论: {verification.get('reason', '')}"]
+            for item in verification.get("results", []):
+                verification_lines.append(
+                    f"- 命令: `{item.get('command', '')}`，返回码: {item.get('returncode', '')}"
+                )
+                if item.get("stderr"):
+                    verification_lines.append(f"  - 错误: {self._truncate_text(item['stderr'], 300)}")
+
+            if output_text.strip() or verification_lines:
                 self.progress_manager.append_to_progress(
-                    f"{summary_title}\n\n- 功能: {next_feature.id} {next_feature.name}\n\n{output_text}"
+                    f"{summary_title}\n\n"
+                    f"- 功能: {next_feature.id} {next_feature.name}\n\n"
+                    f"### Agent 输出\n{self._truncate_text(output_text, 1500)}\n\n"
+                    + "\n".join(verification_lines)
                 )
 
             if self.git_helper.has_changes():
                 if is_completed:
                     commit_msg = f"feat: 完成 {next_feature.name} ({next_feature.id})"
                 else:
-                    commit_msg = f"wip: {next_feature.name} 进行中 ({next_feature.id})"
+                    commit_msg = f"wip: {next_feature.name} 验收未通过 ({next_feature.id})"
                 self.git_helper.commit(commit_msg)
 
             payload = {
@@ -350,7 +579,25 @@ class CodingAgent:
                 "feature_id": next_feature.id,
                 "output": output_text,
                 "status": "completed" if is_completed else "in_progress",
+                "verification": verification,
             }
+
+            self._append_run_log(
+                {
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "iteration": self._iteration_count,
+                    "event": "run_iteration",
+                    "feature_id": next_feature.id,
+                    "status": payload["status"],
+                    "verification": verification,
+                    "precheck": {
+                        "ok": precheck_result.get("ok", False),
+                        "stderr": self._truncate_text(precheck_result.get("stderr", ""), 300),
+                    },
+                    "output_preview": self._truncate_text(output_text, 300),
+                }
+            )
+
             if on_iteration is not None:
                 on_iteration(self._iteration_count, payload)
             return payload
@@ -361,7 +608,21 @@ class CodingAgent:
                 "blocked",
                 f"错误: {exc}",
             )
-            return {"success": False, "error": str(exc), "feature_id": next_feature.id}
+            payload = {
+                "success": False,
+                "error": str(exc),
+                "feature_id": next_feature.id,
+                "status": "blocked",
+            }
+            self._append_run_log(
+                {
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "iteration": self._iteration_count,
+                    "event": "run_exception",
+                    "payload": payload,
+                }
+            )
+            return payload
 
     def run_continuous(
         self,
@@ -440,6 +701,7 @@ class CodingAgent:
         git_history: str,
         init_sh: str,
         feature_list: Any,
+        precheck_result: Optional[Dict[str, Any]] = None,
     ) -> str:
         """构建包含进度、Git 历史和启动脚本的会话上下文。"""
         stats = self.progress_manager.get_progress_stats()
@@ -454,11 +716,25 @@ class CodingAgent:
             f"- 已完成: {stats['completed']}",
             f"- 完成率: {stats['completion_rate']}%",
             "",
-            "### 进度文件内容",
-            progress_content or "（无进度记录）",
-            "",
-            git_history,
+            "### 会话前检查",
         ]
+
+        if precheck_result is None:
+            context_parts.append("- 本轮未执行会话前检查")
+        elif precheck_result.get("ok"):
+            context_parts.append("- 会话前检查通过")
+        else:
+            context_parts.append(f"- 会话前检查失败: {precheck_result.get('stderr', '')}")
+
+        context_parts.extend(
+            [
+                "",
+                "### 进度文件内容",
+                progress_content or "（无进度记录）",
+                "",
+                git_history,
+            ]
+        )
 
         if init_sh:
             context_parts.extend(["", "### init.sh 内容", "```bash", init_sh, "```"])
@@ -480,16 +756,19 @@ class CodingAgent:
                 lines.append(f"{index}. {criteria}")
             lines.append("")
 
-        if feature.test_command:
-            lines.append(f"**测试命令**: `{feature.test_command}`")
+        verify_commands = self._get_feature_verify_commands(feature)
+        if verify_commands:
+            lines.append("**验收命令**:")
+            for index, command in enumerate(verify_commands, 1):
+                lines.append(f"{index}. `{command}`")
             lines.append("")
 
         lines.extend(
             [
                 "**重要提醒**:",
-                "- 完成功能后运行测试并更新状态",
-                "- 确认符合验收标准后再标记 completed",
-                "- 会话结束前记录进度并创建提交",
+                "- 完成功能后必须执行验收命令",
+                "- 只有验收通过才允许标记 completed",
+                "- 会话结束前更新进度并创建提交",
             ]
         )
         return "\n".join(lines)
@@ -515,6 +794,7 @@ class CodingAgent:
                 else None
             ),
             "progress_report": self.progress_manager.get_progress_report(),
+            "run_log_path": self._run_log_path,
         }
 
     def chat(self, message: str, chat_history: Optional[List[Any]] = None) -> str:
@@ -529,6 +809,7 @@ class CodingAgent:
         description: str = "",
         priority: str = "medium",
         dependencies: Optional[List[str]] = None,
+        verify_commands: Optional[List[str]] = None,
     ) -> bool:
         """向功能列表添加新功能项。"""
         return self.progress_manager.add_feature(
@@ -537,6 +818,7 @@ class CodingAgent:
             description=description,
             priority=priority,
             dependencies=dependencies,
+            verify_commands=verify_commands,
         )
 
     def reset_feature(self, feature_id: str) -> bool:

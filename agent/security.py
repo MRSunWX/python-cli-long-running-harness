@@ -566,11 +566,24 @@ class CommandValidator:
         # 提取所有命令进行逐个检查
         commands = self._extract_all_commands(command)
         if not commands:
-            return SecurityCheckResult(
-                allowed=False,
-                reason=f"无法解析命令进行安全验证: {command}",
-                risk_level="medium"
-            )
+            # 解析失败时回退到 shlex 的首命令提取，避免误伤合法命令
+            try:
+                parts = shlex.split(command)
+            except ValueError as exc:
+                return SecurityCheckResult(
+                    allowed=False,
+                    reason=f"无法解析命令进行安全验证: {exc}",
+                    risk_level="medium"
+                )
+
+            if not parts:
+                return SecurityCheckResult(
+                    allowed=False,
+                    reason=f"无法解析命令进行安全验证: {command}",
+                    risk_level="medium"
+                )
+
+            commands = [os.path.basename(parts[0])]
 
         # 需要额外验证的敏感命令
         sensitive_commands = {"pkill", "chmod", "rm"}

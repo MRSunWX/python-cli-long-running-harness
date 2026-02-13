@@ -89,6 +89,22 @@ class Config:
     # 会话之间的自动继续延迟（秒）
     AUTO_CONTINUE_DELAY: float = 3.0
 
+    # 命令执行默认超时时间（秒）
+    # 用于 run_bash 等通用命令执行场景
+    COMMAND_TIMEOUT: int = 60
+
+    # 会话前检查（如 init.sh）超时时间（秒）
+    SESSION_PRECHECK_TIMEOUT: int = 120
+
+    # 功能验收测试命令超时时间（秒）
+    VERIFICATION_TIMEOUT: int = 300
+
+    # 迭代运行日志文件名
+    RUN_LOG_FILE: str = "run_logs.jsonl"
+
+    # 会话前检查脚本文件名
+    INIT_SCRIPT_NAME: str = "init.sh"
+
 
 # 创建全局配置实例
 # 其他模块可以直接导入使用
