@@ -1,0 +1,32 @@
+# Python 缓存与编译产物
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 虚拟环境与 Conda
+.venv/
+venv/
+env/
+ENV/
+.conda/
+
+# 测试与检查缓存
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# IDE 与编辑器
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 运行时生成文件（通常在目标项目目录中）
+**/progress.md
+**/feature_list.json
