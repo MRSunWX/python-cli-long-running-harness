@@ -857,7 +857,34 @@ echo \"[init.sh] 初始化检查通过\"
                     commit_msg = f"feat: 完成 {next_feature.name} ({next_feature.id})"
                 else:
                     commit_msg = f"wip: {next_feature.name} 验收未通过 ({next_feature.id})"
-                self.git_helper.commit(commit_msg)
+                commit_ok = self.git_helper.commit(commit_msg)
+                if commit_ok:
+                    emit_event(
+                        event_type="git_commit",
+                        component="git",
+                        name="run_commit",
+                        payload={
+                            "message": commit_msg,
+                            "feature_id": next_feature.id,
+                            "status": "completed" if is_completed else "in_progress",
+                        },
+                        ok=True,
+                        iteration=self._iteration_count,
+                        phase="run",
+                    )
+                else:
+                    emit_event(
+                        event_type="error",
+                        component="git",
+                        name="run_commit",
+                        payload={
+                            "message": f"提交失败: {commit_msg}",
+                            "feature_id": next_feature.id,
+                        },
+                        ok=False,
+                        iteration=self._iteration_count,
+                        phase="run",
+                    )
 
             payload = {
                 "success": is_completed,
