@@ -159,8 +159,15 @@ def _end_command_event_log(command_name: str, success: bool, summary: str) -> No
 @click.option('--spec', '-s', required=True, help='项目需求描述')
 @click.option('--name', '-n', default=None, help='项目名称（默认从目录名推断）')
 @click.option('--template', '-t', default=None, help='项目模板（可选）')
+@click.option(
+    '--init-mode',
+    type=click.Choice(['scaffold-only', 'open']),
+    default='scaffold-only',
+    show_default=True,
+    help='初始化模式：scaffold-only 仅创建脚手架，open 允许初始化阶段继续实现'
+)
 @click.pass_context
-def init(ctx, project_dir, spec, name, template):
+def init(ctx, project_dir, spec, name, template, init_mode):
     """
     初始化新项目
 
@@ -170,6 +177,7 @@ def init(ctx, project_dir, spec, name, template):
     示例:
       python main.py init ./my_app --spec "创建一个待办事项应用"
       python main.py init ./web_api --spec "创建 REST API" --name "MyAPI"
+      python main.py init ./my_app --spec "创建一个待办事项应用" --init-mode open
     """
     model = ctx.obj['model']
     url = ctx.obj['url']
@@ -227,11 +235,17 @@ def init(ctx, project_dir, spec, name, template):
     if RICH_AVAILABLE:
         console.print(f"\n[cyan]正在初始化项目...[/cyan]")
         console.print(f"[dim]需求: {spec[:100]}...[/dim]\n")
+        console.print(f"[dim]初始化模式: {init_mode}[/dim]\n")
     else:
         print(f"\n正在初始化项目...")
         print(f"需求: {spec[:100]}...\n")
+        print(f"初始化模式: {init_mode}\n")
 
-    success = agent.initialize(requirements=spec, project_name=name)
+    success = agent.initialize(
+        requirements=spec,
+        project_name=name,
+        init_mode=init_mode,
+    )
 
     if success:
         if RICH_AVAILABLE:

@@ -24,7 +24,7 @@ pip install -r requirements.txt
 # 3) 查看 CLI 总帮助
 python main.py --help
 
-# 4) 初始化项目（会在目标目录创建 progress.md / feature_list.json / init.sh）
+# 4) 初始化项目（默认 scaffold-only，只创建脚手架）
 python main.py init ./my_project --spec "创建一个命令行应用"
 
 # 5) 执行一次任务循环
@@ -70,10 +70,13 @@ python main.py [--model MODEL] [--url URL] [-v|--verbose] [--verbose-events|--qu
 ### `init`
 
 ```bash
-python main.py init <project_dir> --spec "需求描述" [--name 项目名] [--template 模板名]
+python main.py init <project_dir> --spec "需求描述" [--name 项目名] [--template 模板名] [--init-mode scaffold-only|open]
 ```
 
-作用：初始化目标项目目录，生成基础工件并尝试创建初始化提交。
+作用：初始化目标项目目录，生成基础工件并尝试创建初始化提交。  
+模式说明：
+- `scaffold-only`（默认）：只做初始化脚手架，不进入功能开发。
+- `open`：允许初始化阶段继续调用初始化 Agent 进行扩展实现（高级选项）。
 
 ### `run`
 
@@ -122,12 +125,17 @@ python main.py add-feature <project_dir> \
 
 ### 2) 初始化阶段（`init`）
 
-`python main.py init ...` 的核心动作：
+`python main.py init ...` 的核心动作（默认 `scaffold-only`）：
 1. 创建 `progress.md` 与 `feature_list.json`
 2. 若功能清单为空，写入一个可跑通的默认功能
-3. 确保 `init.sh` 存在且可执行
-4. 尝试生成初始化分析（模型失败时降级，不阻断初始化）
-5. 若不是 Git 仓库则初始化，并在有变更时提交 `chore: 项目初始化`
+3. 确保 `.gitignore` 包含 `events.jsonl`/`run_logs.jsonl` 忽略规则
+4. 确保 `init.sh` 存在且可执行
+5. 若不是 Git 仓库则初始化，并取消跟踪已误入库的运行日志文件
+6. 在有变更时提交 `chore: 项目初始化`
+
+补充：
+- 只有在 `--init-mode open` 时，初始化阶段才会继续调用初始化提示词。
+- 默认模式不会在 `init` 阶段推进 feature 实现。
 
 ### 3) 运行阶段（`run`）
 
@@ -174,6 +182,9 @@ python main.py add-feature <project_dir> \
 4. `init.sh` 内容（若存在）
 5. 当前任务描述（含验收命令）
 
+明确边界：
+- 不会将 `events.jsonl` / `run_logs.jsonl` 注入 run 阶段上下文。
+
 说明：
 - 当前实现未做“严格 token 预算分配”和分段裁剪策略。  
 - 对长 `progress.md` / 长 git 历史 / 长脚本场景，后续建议再补充上下文裁剪机制。
@@ -200,6 +211,7 @@ python main.py add-feature <project_dir> \
 
 定位：迭代级运行日志，用于复盘每轮执行。  
 典型包含：轮次、功能 ID、状态、验收结果、precheck 摘要、输出预览。
+默认会保留在本地文件系统，但会被自动加入目标项目 `.gitignore`。
 
 ### `events.jsonl`
 
@@ -214,6 +226,7 @@ python main.py add-feature <project_dir> \
 - `name`
 - `payload`
 - `ok`
+默认会保留在本地文件系统，但会被自动加入目标项目 `.gitignore`。
 
 ### 终端中文前缀
 
@@ -235,7 +248,7 @@ python main.py add-feature <project_dir> \
 ### 1) 模型不可达 / 初始化分析失败
 
 现象：`init` 期间模型调用报错。  
-处理：初始化流程会降级继续，先保证 `progress.md`、`feature_list.json`、`init.sh`、Git 基础可用。
+处理：`scaffold-only` 默认不依赖初始化模型；`open` 模式下若模型失败会降级继续，先保证 `progress.md`、`feature_list.json`、`init.sh`、Git 基础可用。
 
 ### 2) precheck 失败（`init.sh` 失败）
 
@@ -256,6 +269,14 @@ bash ./init.sh
 
 现象：`run` 提示没有可执行功能。  
 处理：检查是否存在依赖阻塞（`dependencies` 未完成），或 feature 状态配置不合理。
+
+### 5) 初始化阶段出现长循环提交
+
+现象：`init` 长时间不结束，反复提交日志文件。  
+处理：
+1. 使用默认模式：`python main.py init <dir> --spec "..."`（即 `scaffold-only`）。
+2. 检查目标项目 `.gitignore` 是否包含 `events.jsonl` 与 `run_logs.jsonl`。
+3. 在目标项目执行 `git ls-files | rg "events.jsonl|run_logs.jsonl"`，正常应无输出。
 
 ## 基础校验命令
 

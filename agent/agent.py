@@ -337,6 +337,152 @@ class CodingAgent:
             # 日志写入失败不应阻断主流程
             pass
 
+    def _runtime_log_files(self) -> List[str]:
+        """返回需要长期忽略 Git 跟踪的运行日志文件名列表。"""
+        return [Config.EVENT_LOG_FILE, Config.RUN_LOG_FILE]
+
+    def _ensure_runtime_logs_ignored(self) -> None:
+        """确保目标项目 .gitignore 包含运行日志忽略规则。"""
+        gitignore_path = os.path.join(self.project_dir, ".gitignore")
+        required_entries = self._runtime_log_files()
+
+        existing_lines: List[str] = []
+        if os.path.exists(gitignore_path):
+            with open(gitignore_path, "r", encoding="utf-8") as file_obj:
+                existing_lines = file_obj.read().splitlines()
+
+        normalized = {
+            line.strip()
+            for line in existing_lines
+            if line.strip() and not line.strip().startswith("#")
+        }
+        missing_entries = [entry for entry in required_entries if entry not in normalized]
+        if not missing_entries:
+            emit_event(
+                event_type="git_status",
+                component="git",
+                name="ensure_runtime_logs_ignored",
+                payload={"message": "运行日志忽略规则已存在", "files": required_entries},
+                ok=True,
+                phase="init",
+            )
+            return
+
+        output_lines = list(existing_lines)
+        if output_lines and output_lines[-1].strip():
+            output_lines.append("")
+        output_lines.append("# Agent runtime logs")
+        output_lines.extend(missing_entries)
+        output_content = "\n".join(output_lines) + "\n"
+        with open(gitignore_path, "w", encoding="utf-8") as file_obj:
+            file_obj.write(output_content)
+
+        emit_event(
+            event_type="git_status",
+            component="git",
+            name="ensure_runtime_logs_ignored",
+            payload={
+                "message": "已更新 .gitignore 运行日志忽略规则",
+                "path": gitignore_path,
+                "added": missing_entries,
+            },
+            ok=True,
+            phase="init",
+        )
+
+    def _untrack_runtime_logs_if_needed(self) -> None:
+        """若运行日志已被 Git 跟踪，则取消跟踪并保留本地文件。"""
+        if not self.git_helper.is_repo():
+            emit_event(
+                event_type="git_status",
+                component="git",
+                name="untrack_runtime_logs",
+                payload={"message": "非 Git 仓库，跳过取消跟踪"},
+                ok=True,
+                phase="init",
+            )
+            return
+
+        runtime_logs = self._runtime_log_files()
+        ls_result = subprocess.run(
+            ["git", "ls-files", "--"] + runtime_logs,
+            cwd=self.project_dir,
+            capture_output=True,
+            text=True,
+        )
+        if ls_result.returncode != 0:
+            emit_event(
+                event_type="error",
+                component="git",
+                name="untrack_runtime_logs",
+                payload={"message": ls_result.stderr.strip()},
+                ok=False,
+                phase="init",
+            )
+            return
+
+        tracked_files = [line.strip() for line in ls_result.stdout.splitlines() if line.strip()]
+        if not tracked_files:
+            emit_event(
+                event_type="git_status",
+                component="git",
+                name="untrack_runtime_logs",
+                payload={"message": "运行日志未被跟踪，无需处理"},
+                ok=True,
+                phase="init",
+            )
+            return
+
+        untrack_result = subprocess.run(
+            ["git", "rm", "--cached", "--ignore-unmatch", "--"] + tracked_files,
+            cwd=self.project_dir,
+            capture_output=True,
+            text=True,
+        )
+        if untrack_result.returncode != 0:
+            emit_event(
+                event_type="error",
+                component="git",
+                name="untrack_runtime_logs",
+                payload={"message": untrack_result.stderr.strip(), "files": tracked_files},
+                ok=False,
+                phase="init",
+            )
+            return
+
+        emit_event(
+            event_type="git_status",
+            component="git",
+            name="untrack_runtime_logs",
+            payload={"message": "已取消跟踪运行日志文件", "files": tracked_files},
+            ok=True,
+            phase="init",
+        )
+
+    def _build_scaffold_init_summary(self, project_name: str, requirements: str) -> str:
+        """生成 scaffold-only 模式的初始化摘要并写入 progress.md。"""
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        requirement_preview = self._truncate_text(requirements.strip(), 500)
+        summary_lines = [
+            "## 初始化分析（scaffold-only）",
+            "",
+            f"- 时间: {now}",
+            "- 模式: scaffold-only（仅脚手架，不进入功能实现）",
+            f"- 项目名称: {project_name}",
+            "- 已完成项:",
+            "  - 创建/更新 progress.md",
+            "  - 创建/更新 feature_list.json",
+            "  - 写入 .gitignore 运行日志忽略规则",
+            "  - 确保 init.sh 可执行",
+            "  - 初始化 Git 并准备初始提交",
+            "",
+            "- 需求摘要:",
+            requirement_preview or "（空）",
+            "",
+            "- 下一步: 使用 `python main.py run <project_dir>` 进入功能开发迭代",
+        ]
+        return "\n".join(summary_lines)
+
     def _execute_validated_command(self, command: str, timeout: int) -> Dict[str, Any]:
         """执行经过安全校验的命令并返回结构化结果。"""
         emit_event(
@@ -698,14 +844,23 @@ echo \"[init.sh] 初始化检查通过\"
         )
         return fallback_result
 
-    def initialize(self, requirements: str, project_name: Optional[str] = None) -> bool:
+    def initialize(
+        self,
+        requirements: str,
+        project_name: Optional[str] = None,
+        init_mode: str = "scaffold-only",
+    ) -> bool:
         """初始化项目进度文件、基础结构和初始 Git 提交。"""
+        normalized_mode = (init_mode or "scaffold-only").strip().lower()
+        if normalized_mode not in {"scaffold-only", "open"}:
+            normalized_mode = "scaffold-only"
+
         update_event_context(phase="init", project_dir=self.project_dir)
         emit_event(
             event_type="session_start",
             component="agent",
             name="initialize",
-            payload={"message": "开始执行初始化流程"},
+            payload={"message": "开始执行初始化流程", "init_mode": normalized_mode},
             ok=True,
             phase="init",
         )
@@ -727,30 +882,52 @@ echo \"[init.sh] 初始化检查通过\"
                     verify_commands=["ls -la"],
                 )
 
+            # 先确保运行日志不纳入版本控制，避免初始化阶段循环提交日志文件
+            self._ensure_runtime_logs_ignored()
+
             # 无论模型是否可用，都先确保 init.sh 存在，保证后续 run 可执行
             self._ensure_init_script()
 
-            # 初始化分析阶段：模型失败时降级为提示信息，不阻断初始化成功
-            try:
-                init_prompt = prompt_loader.get_initializer_prompt(
-                    requirements=requirements,
-                    project_name=project_name,
-                    project_dir=self.project_dir,
-                    current_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                )
-                init_result = self._invoke_agent(init_prompt, [])
-                init_output = init_result.get("output", "").strip()
-                if init_output:
-                    self.progress_manager.append_to_progress("## 初始化分析\n\n" + init_output)
-            except Exception as exc:
-                self.progress_manager.append_to_progress(
-                    "## 初始化分析\n\n"
-                    f"- 模型初始化分析失败，已降级继续。\n"
-                    f"- 原因: {exc}"
-                )
-
             if not self.git_helper.is_repo():
                 self.git_helper.init_repo()
+
+            # 历史项目可能已经把运行日志纳入了索引，这里统一取消跟踪但保留本地文件
+            self._untrack_runtime_logs_if_needed()
+
+            if normalized_mode == "open":
+                # 初始化分析阶段：模型失败时降级为提示信息，不阻断初始化成功
+                try:
+                    init_prompt = prompt_loader.get_initializer_prompt(
+                        requirements=requirements,
+                        project_name=project_name,
+                        project_dir=self.project_dir,
+                        current_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        init_mode=normalized_mode,
+                    )
+                    init_result = self._invoke_agent(init_prompt, [])
+                    init_output = init_result.get("output", "").strip()
+                    if init_output:
+                        self.progress_manager.append_to_progress("## 初始化分析\n\n" + init_output)
+                except Exception as exc:
+                    self.progress_manager.append_to_progress(
+                        "## 初始化分析\n\n"
+                        f"- 模型初始化分析失败，已降级继续。\n"
+                        f"- 原因: {exc}"
+                    )
+            else:
+                scaffold_summary = self._build_scaffold_init_summary(
+                    project_name=project_name,
+                    requirements=requirements,
+                )
+                self.progress_manager.append_to_progress(scaffold_summary)
+                emit_event(
+                    event_type="assistant_text",
+                    component="agent",
+                    name="initialize_summary",
+                    payload={"text_preview": self._truncate_text(scaffold_summary, 500)},
+                    ok=True,
+                    phase="init",
+                )
 
             if self.git_helper.has_changes():
                 self.git_helper.commit("chore: 项目初始化")
@@ -758,7 +935,7 @@ echo \"[init.sh] 初始化检查通过\"
                     event_type="git_commit",
                     component="git",
                     name="initialize_commit",
-                    payload={"message": "chore: 项目初始化"},
+                    payload={"message": "chore: 项目初始化", "init_mode": normalized_mode},
                     ok=True,
                     phase="init",
                 )

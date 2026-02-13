@@ -172,7 +172,8 @@ class PromptLoader:
         requirements: str,
         project_name: str = "未命名项目",
         project_dir: str = "",
-        current_time: str = None
+        current_time: str = None,
+        init_mode: str = "scaffold-only",
     ) -> str:
         """
         获取初始化提示词
@@ -182,6 +183,7 @@ class PromptLoader:
             project_name: 项目名称
             project_dir: 项目目录路径
             current_time: 当前时间（可选，默认自动生成）
+            init_mode: 初始化模式（scaffold-only/open）
 
         返回:
             str: 格式化后的初始化提示词
@@ -200,7 +202,8 @@ class PromptLoader:
             requirements=requirements,
             project_name=project_name,
             project_dir=project_dir,
-            current_time=current_time
+            current_time=current_time,
+            init_mode=init_mode,
         )
 
     def get_coding_prompt(
@@ -377,17 +380,18 @@ def get_system_prompt() -> str:
     return loader.get_system_prompt()
 
 
-def get_initializer_prompt(requirements: str) -> str:
+def get_initializer_prompt(requirements: str, init_mode: str = "scaffold-only") -> str:
     """
     获取初始化提示词（便捷函数）
 
     参数:
         requirements: 项目需求描述
+        init_mode: 初始化模式（scaffold-only/open）
 
     返回:
         str: 格式化后的初始化提示词
     """
-    return loader.get_initializer_prompt(requirements=requirements)
+    return loader.get_initializer_prompt(requirements=requirements, init_mode=init_mode)
 
 
 def get_coding_prompt(
@@ -469,17 +473,21 @@ class PromptTemplates:
         """
         return self._loader.get_system_prompt()
 
-    def get_initializer(self, requirements: str) -> str:
+    def get_initializer(self, requirements: str, init_mode: str = "scaffold-only") -> str:
         """
         获取初始化提示词
 
         参数:
             requirements: 项目需求
+            init_mode: 初始化模式（scaffold-only/open）
 
         返回:
             str: 初始化提示词
         """
-        return self._loader.get_initializer_prompt(requirements=requirements)
+        return self._loader.get_initializer_prompt(
+            requirements=requirements,
+            init_mode=init_mode,
+        )
 
     def get_coding(
         self,
