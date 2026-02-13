@@ -44,7 +44,7 @@ conda run -n demo python main.py status ./my_project --json
 
 ## 运行前置条件
 
-1. Python 3 环境可用（建议使用 `demo` conda 环境）。
+1. Python 3 环境可用。
 2. 依赖已安装：`pip install -r requirements.txt`。
 3. 模型服务可访问：
 - 默认模型地址来自 `config.py`（`Config.OLLAMA_BASE_URL`）。
@@ -57,7 +57,7 @@ conda run -n demo python main.py status ./my_project --json
 python main.py --url "http://127.0.0.1:11434/v1" --model "qwen3-coder:30b" run ./my_project
 ```
 
-## 命令总览（与当前实现对齐）
+## 命令总览
 
 ### 全局参数
 
