@@ -31,7 +31,7 @@
 
 ## 环境准备
 
-你已指定使用 conda 环境 `demo`，推荐如下：
+使用 conda 环境 `demo`，推荐如下：
 
 ```bash
 conda activate demo
