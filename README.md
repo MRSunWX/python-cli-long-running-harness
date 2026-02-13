@@ -25,6 +25,7 @@
 │   ├── progress.py          # 进度和 feature 管理
 │   ├── git_helper.py        # Git 操作封装
 │   ├── prompts.py           # 提示词加载与格式化
+│   ├── event_logger.py      # 事件日志（终端+JSONL）
 │   └── __init__.py
 ├── prompts/                 # 提示词模板（.md）
 └── requirements.txt
@@ -44,6 +45,12 @@ pip install -r requirements.txt
 ```bash
 # 查看帮助
 python main.py --help
+
+# 默认详细事件日志（中文前缀）
+python main.py init ./demo_project --spec "创建一个 Flask 应用"
+
+# 关闭详细事件日志（仅保留简洁输出）
+python main.py --quiet-events init ./demo_project --spec "创建一个 Flask 应用"
 
 # 初始化一个项目目录
 python main.py init ./demo_project --spec "创建一个 Flask 应用"
@@ -73,7 +80,40 @@ python main.py add-feature ./demo_project --id feat-003 --name "导出报告" --
 - 会话前检查：每轮 `run` 前会先执行项目内 `init.sh`（存在时）。
 - 测试门禁：只有功能的验收命令全部通过，状态才会变为 `completed`。
 - 运行日志：每轮执行会写入 `run_logs.jsonl`，用于复盘。
+- 事件日志：默认详细输出中文前缀事件，并写入 `events.jsonl`。
 - 降级初始化：模型不可达时仍可完成本地初始化，不阻断项目启动。
+
+## 事件日志说明
+
+默认情况下（`--verbose-events`），终端会输出以下中文前缀：
+
+- `[会话]`：会话开始、结束、阶段状态
+- `[助手]`：模型回复摘要
+- `[工具调用]`：工具名称与输入摘要
+- `[工具结果]`：执行状态（完成/错误/拦截）、返回码、耗时
+
+并且会同步写入项目目录下的 `events.jsonl`（JSONL 结构化日志）：
+
+- `timestamp`：时间戳
+- `session_id`：会话标识
+- `iteration`：迭代编号
+- `phase`：阶段（init/run/chat/status）
+- `event_type`：事件类型
+- `component`：组件来源（cli/agent/tool/security/git）
+- `name`：事件名称
+- `payload`：事件内容
+- `ok`：是否成功
+
+示例输出：
+
+```text
+[会话] 开始执行命令: init
+[会话] Agent 实例初始化
+[助手] 已完成初始化分析...
+[工具调用] <run_bash - python -m pytest -q>
+[工具结果] [完成] run_bash 返回码=0 耗时=0.2s
+[会话] 项目初始化完成
+```
 
 ## 测试与校验
 
