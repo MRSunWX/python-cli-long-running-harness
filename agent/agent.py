@@ -19,6 +19,7 @@ import shlex
 import subprocess
 import sys
 import time
+import hashlib
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
@@ -237,6 +238,90 @@ class CodingAgent:
         if len(text) <= max_len:
             return text
         return text[:max_len] + "\n...(已截断)"
+
+    def _compress_progress_content(self, progress_content: str) -> str:
+        """
+        压缩 progress.md 内容，保留项目头部与最近关键章节。
+
+        参数:
+            progress_content: 原始进度文件全文
+
+        返回:
+            str: 压缩后的进度摘要
+        """
+        if not progress_content.strip():
+            return "（无进度记录）"
+
+        lines = progress_content.splitlines()
+        head_part = "\n".join(lines[:30]).strip()
+
+        # 以二级标题切分，优先保留最近几个章节（通常包含最新执行结果与问题）。
+        blocks = progress_content.split("\n## ")
+        normalized_blocks: List[str] = []
+        for index, block in enumerate(blocks):
+            block = block.strip()
+            if not block:
+                continue
+            if index == 0:
+                normalized_blocks.append(block)
+            else:
+                normalized_blocks.append("## " + block)
+
+        tail_count = max(1, Config.CONTEXT_RECENT_PROGRESS_SECTIONS)
+        recent_blocks = normalized_blocks[-tail_count:]
+        recent_part = "\n\n".join(recent_blocks).strip()
+
+        compressed = (
+            "### 进度头部摘要\n"
+            f"{head_part}\n\n"
+            "### 最近进展章节\n"
+            f"{recent_part}"
+        )
+        return self._truncate_text(compressed, Config.CONTEXT_PROGRESS_MAX_CHARS)
+
+    def _compress_git_history(self, git_history: str) -> str:
+        """
+        压缩 Git 历史文本。
+
+        参数:
+            git_history: 原始 Git 历史文本
+
+        返回:
+            str: 压缩后的历史摘要
+        """
+        if not git_history.strip():
+            return "（无 Git 历史）"
+        return self._truncate_text(git_history, Config.CONTEXT_GIT_MAX_CHARS)
+
+    def _compress_init_script(self, init_sh: str) -> str:
+        """
+        压缩 init.sh 内容，保留前几行与摘要元信息。
+
+        参数:
+            init_sh: init.sh 原始内容
+
+        返回:
+            str: 压缩后的 init.sh 文本（含元信息）
+        """
+        if not init_sh.strip():
+            return ""
+
+        lines = init_sh.splitlines()
+        max_lines = max(1, Config.CONTEXT_INIT_MAX_LINES)
+        preview_lines = lines[:max_lines]
+        preview = "\n".join(preview_lines)
+        if len(lines) > max_lines:
+            preview += "\n# ...(已截断)"
+
+        digest = hashlib.sha1(init_sh.encode("utf-8")).hexdigest()[:12]
+        preview = self._truncate_text(preview, Config.CONTEXT_INIT_MAX_CHARS)
+        return (
+            f"- 总行数: {len(lines)}\n"
+            f"- SHA1: {digest}\n"
+            "```bash\n"
+            f"{preview}\n"
+            "```"
+        )
 
     @property
     def _run_log_path(self) -> str:
@@ -758,7 +843,8 @@ echo \"[init.sh] 初始化检查通过\"
             )
             return payload
 
-        next_feature = self.progress_manager.get_next_feature()
+        scheduling = self.progress_manager.get_next_feature_with_reason()
+        next_feature = scheduling.get("feature")
         if next_feature is None:
             stats = self.progress_manager.get_progress_stats()
             if stats.get("completion_rate") == 100:
@@ -773,12 +859,28 @@ echo \"[init.sh] 初始化检查通过\"
                     phase="run",
                 )
                 return payload
-            payload = {"success": False, "error": "没有可执行的功能（可能被依赖阻塞）"}
+
+            reason_parts: List[str] = []
+            dependency_blocked = scheduling.get("dependency_blocked", [])
+            cooldown_blocked = scheduling.get("cooldown_blocked", [])
+            if dependency_blocked:
+                blocked_ids = ",".join(item.get("id", "") for item in dependency_blocked[:5])
+                reason_parts.append(f"依赖未满足({blocked_ids})")
+            if cooldown_blocked:
+                cooldown_ids = ",".join(item.get("id", "") for item in cooldown_blocked[:5])
+                reason_parts.append(f"冷却中({cooldown_ids})")
+
+            detail = "；".join(reason_parts) if reason_parts else "可能被依赖阻塞"
+            payload = {"success": False, "error": f"没有可执行的功能（{detail}）"}
             emit_event(
                 event_type="session_end",
                 component="agent",
                 name="run",
-                payload={"message": payload["error"]},
+                payload={
+                    "message": payload["error"],
+                    "dependency_blocked_count": len(dependency_blocked),
+                    "cooldown_blocked_count": len(cooldown_blocked),
+                },
                 ok=False,
                 iteration=self._iteration_count,
                 phase="run",
@@ -821,7 +923,13 @@ echo \"[init.sh] 初始化检查通过\"
             is_completed = verification.get("passed", False)
 
             now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            run_status = "completed" if is_completed else "in_progress"
             if is_completed:
+                self.progress_manager.record_feature_attempt(
+                    feature_id=next_feature.id,
+                    success=True,
+                    cooldown_seconds=0,
+                )
                 self.progress_manager.update_feature_status(
                     next_feature.id,
                     "completed",
@@ -829,12 +937,37 @@ echo \"[init.sh] 初始化检查通过\"
                 )
                 summary_title = "## 功能执行记录（完成）"
             else:
-                self.progress_manager.update_feature_status(
-                    next_feature.id,
-                    "in_progress",
-                    f"会话结束于 {now_str}；{verification.get('reason', '验收未通过')}",
+                updated_feature = self.progress_manager.record_feature_attempt(
+                    feature_id=next_feature.id,
+                    success=False,
+                    cooldown_seconds=Config.FEATURE_FAILURE_COOLDOWN_SECONDS,
                 )
-                summary_title = "## 功能执行记录（进行中）"
+                fail_count = (updated_feature.consecutive_failures if updated_feature else 1)
+                cooldown_info = ""
+                if updated_feature and updated_feature.cooldown_until:
+                    cooldown_info = f"；冷却至 {updated_feature.cooldown_until}"
+
+                if fail_count >= Config.FEATURE_MAX_CONSECUTIVE_FAILURES:
+                    run_status = "blocked"
+                    self.progress_manager.update_feature_status(
+                        next_feature.id,
+                        "blocked",
+                        (
+                            f"会话结束于 {now_str}；{verification.get('reason', '验收未通过')}"
+                            f"；连续失败 {fail_count} 次，已转 blocked"
+                        ),
+                    )
+                    summary_title = "## 功能执行记录（阻塞）"
+                else:
+                    self.progress_manager.update_feature_status(
+                        next_feature.id,
+                        "in_progress",
+                        (
+                            f"会话结束于 {now_str}；{verification.get('reason', '验收未通过')}"
+                            f"；连续失败 {fail_count} 次{cooldown_info}"
+                        ),
+                    )
+                    summary_title = "## 功能执行记录（进行中）"
 
             verification_lines = ["### 验收结果", f"- 结论: {verification.get('reason', '')}"]
             for item in verification.get("results", []):
@@ -890,7 +1023,7 @@ echo \"[init.sh] 初始化检查通过\"
                 "success": is_completed,
                 "feature_id": next_feature.id,
                 "output": output_text,
-                "status": "completed" if is_completed else "in_progress",
+                "status": run_status,
                 "verification": verification,
             }
 
@@ -924,16 +1057,32 @@ echo \"[init.sh] 初始化检查通过\"
             return payload
 
         except Exception as exc:
+            updated_feature = self.progress_manager.record_feature_attempt(
+                feature_id=next_feature.id,
+                success=False,
+                cooldown_seconds=Config.FEATURE_FAILURE_COOLDOWN_SECONDS,
+            )
+            fail_count = (updated_feature.consecutive_failures if updated_feature else 1)
+            if fail_count >= Config.FEATURE_MAX_CONSECUTIVE_FAILURES:
+                final_status = "blocked"
+                final_note = f"错误: {exc}；连续失败 {fail_count} 次，已转 blocked"
+            else:
+                final_status = "in_progress"
+                cooldown_info = ""
+                if updated_feature and updated_feature.cooldown_until:
+                    cooldown_info = f"；冷却至 {updated_feature.cooldown_until}"
+                final_note = f"错误: {exc}；连续失败 {fail_count} 次{cooldown_info}"
+
             self.progress_manager.update_feature_status(
                 next_feature.id,
-                "blocked",
-                f"错误: {exc}",
+                final_status,
+                final_note,
             )
             payload = {
                 "success": False,
                 "error": str(exc),
                 "feature_id": next_feature.id,
-                "status": "blocked",
+                "status": final_status,
             }
             self._append_run_log(
                 {
@@ -1044,6 +1193,10 @@ echo \"[init.sh] 初始化检查通过\"
     ) -> str:
         """构建包含进度、Git 历史和启动脚本的会话上下文。"""
         stats = self.progress_manager.get_progress_stats()
+        compressed_progress = self._compress_progress_content(progress_content)
+        compressed_git_history = self._compress_git_history(git_history)
+        compressed_init_sh = self._compress_init_script(init_sh)
+
         context_parts = [
             "## 会话上下文",
             "",
@@ -1068,17 +1221,19 @@ echo \"[init.sh] 初始化检查通过\"
         context_parts.extend(
             [
                 "",
-                "### 进度文件内容",
-                progress_content or "（无进度记录）",
+                "### 进度文件摘要（压缩）",
+                compressed_progress,
                 "",
-                git_history,
+                "### 最近 Git 历史（压缩）",
+                compressed_git_history,
             ]
         )
 
-        if init_sh:
-            context_parts.extend(["", "### init.sh 内容", "```bash", init_sh, "```"])
+        if compressed_init_sh:
+            context_parts.extend(["", "### init.sh 摘要（压缩）", compressed_init_sh])
 
-        return "\n".join(context_parts)
+        context_text = "\n".join(context_parts)
+        return self._truncate_text(context_text, Config.CONTEXT_TOTAL_MAX_CHARS)
 
     def _format_current_task(self, feature: Feature) -> str:
         """格式化当前执行任务的描述文本。"""

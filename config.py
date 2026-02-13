@@ -99,6 +99,12 @@ class Config:
     # 功能验收测试命令超时时间（秒）
     VERIFICATION_TIMEOUT: int = 300
 
+    # 功能连续失败后的冷却秒数（用于避免 in_progress 永久霸占）
+    FEATURE_FAILURE_COOLDOWN_SECONDS: int = 300
+
+    # 功能连续失败达到阈值后，自动转为 blocked
+    FEATURE_MAX_CONSECUTIVE_FAILURES: int = 3
+
     # 迭代运行日志文件名
     RUN_LOG_FILE: str = "run_logs.jsonl"
 
@@ -113,6 +119,14 @@ class Config:
 
     # 事件日志文本预览长度
     EVENT_PREVIEW_LENGTH: int = 300
+
+    # 上下文压缩相关阈值（按字符数近似控制 token）
+    CONTEXT_TOTAL_MAX_CHARS: int = 12000
+    CONTEXT_PROGRESS_MAX_CHARS: int = 4000
+    CONTEXT_GIT_MAX_CHARS: int = 1500
+    CONTEXT_INIT_MAX_CHARS: int = 2500
+    CONTEXT_INIT_MAX_LINES: int = 60
+    CONTEXT_RECENT_PROGRESS_SECTIONS: int = 3
 
 
 # 创建全局配置实例

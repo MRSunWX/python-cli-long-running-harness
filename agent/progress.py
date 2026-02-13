@@ -21,7 +21,7 @@
 
 import os
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, asdict
 
@@ -47,6 +47,10 @@ class Feature:
         priority: 优先级（high/medium/low）
         status: 状态（pending/in_progress/completed/blocked）
         dependencies: 依赖的其他功能 ID 列表
+        attempt_count: 历史尝试次数
+        consecutive_failures: 连续失败次数
+        last_attempt_at: 最近一次尝试时间
+        cooldown_until: 冷却结束时间（未到期前不会被调度）
         created_at: 创建时间
         updated_at: 更新时间
         notes: 备注信息
@@ -60,6 +64,10 @@ class Feature:
     priority: str = "medium"
     status: str = "pending"
     dependencies: List[str] = None
+    attempt_count: int = 0
+    consecutive_failures: int = 0
+    last_attempt_at: str = ""
+    cooldown_until: str = ""
     created_at: str = ""
     updated_at: str = ""
     notes: str = ""
@@ -117,6 +125,10 @@ class Feature:
             priority=data.get("priority", "medium"),
             status=data.get("status", "pending"),
             dependencies=data.get("dependencies", []),
+            attempt_count=data.get("attempt_count", 0),
+            consecutive_failures=data.get("consecutive_failures", 0),
+            last_attempt_at=data.get("last_attempt_at", ""),
+            cooldown_until=data.get("cooldown_until", ""),
             created_at=data.get("created_at", ""),
             updated_at=data.get("updated_at", ""),
             notes=data.get("notes", "")
@@ -232,6 +244,34 @@ class ProgressManager:
     # 文件名常量
     PROGRESS_FILE = "progress.md"
     FEATURE_LIST_FILE = "feature_list.json"
+
+    @staticmethod
+    def _now_str() -> str:
+        """
+        获取当前时间字符串。
+
+        返回:
+            str: 格式化时间
+        """
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    @staticmethod
+    def _parse_time(time_str: str) -> Optional[datetime]:
+        """
+        将时间字符串解析为 datetime 对象。
+
+        参数:
+            time_str: 时间字符串
+
+        返回:
+            Optional[datetime]: 解析结果，失败返回 None
+        """
+        if not time_str:
+            return None
+        try:
+            return datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return None
 
     def __init__(self, project_dir: str):
         """
@@ -543,6 +583,64 @@ class ProgressManager:
             print(f"更新功能状态失败: {str(e)}")
             return False
 
+    def record_feature_attempt(
+        self,
+        feature_id: str,
+        success: bool,
+        cooldown_seconds: int = 0
+    ) -> Optional[Feature]:
+        """
+        记录一次功能尝试结果，并更新失败计数与冷却时间。
+
+        参数:
+            feature_id: 功能 ID
+            success: 本次是否成功
+            cooldown_seconds: 失败后冷却秒数
+
+        返回:
+            Optional[Feature]: 更新后的功能对象，失败返回 None
+        """
+        try:
+            feature_list = self.load_feature_list()
+            if feature_list is None:
+                return None
+
+            updated_feature: Optional[Feature] = None
+            now_str = self._now_str()
+
+            for feature in feature_list.features:
+                if feature.id != feature_id:
+                    continue
+
+                feature.attempt_count = int(feature.attempt_count or 0) + 1
+                feature.last_attempt_at = now_str
+                feature.updated_at = now_str
+
+                if success:
+                    feature.consecutive_failures = 0
+                    feature.cooldown_until = ""
+                else:
+                    feature.consecutive_failures = int(feature.consecutive_failures or 0) + 1
+                    if cooldown_seconds > 0:
+                        cooldown_at = datetime.now() + timedelta(seconds=cooldown_seconds)
+                        feature.cooldown_until = cooldown_at.strftime("%Y-%m-%d %H:%M:%S")
+                    else:
+                        feature.cooldown_until = ""
+
+                updated_feature = feature
+                break
+
+            if updated_feature is None:
+                print(f"未找到功能 ID '{feature_id}'")
+                return None
+
+            self._save_feature_list()
+            return updated_feature
+
+        except Exception as e:
+            print(f"记录功能尝试失败: {str(e)}")
+            return None
+
     def clear_cache(self) -> None:
         """
         清除功能列表缓存
@@ -610,21 +708,84 @@ class ProgressManager:
             优先返回 in_progress 状态的功能，
             然后是 pending 状态的高优先级功能。
         """
+        scheduling = self.get_next_feature_with_reason()
+        return scheduling.get("feature")
+
+    def get_next_feature_with_reason(self) -> Dict[str, Any]:
+        """
+        获取下一个功能并提供调度诊断信息。
+
+        返回:
+            Dict[str, Any]: 包含选择结果和阻塞原因
+        """
         pending = self.get_pending_features()
 
-        # 优先处理进行中的任务
+        in_progress_ready: List[Feature] = []
+        pending_ready: List[Feature] = []
+        dependency_blocked: List[Dict[str, Any]] = []
+        cooldown_blocked: List[Dict[str, Any]] = []
+
         for feature in pending:
+            if not self._check_dependencies(feature):
+                dependency_blocked.append(
+                    {
+                        "id": feature.id,
+                        "status": feature.status,
+                        "dependencies": feature.dependencies,
+                    }
+                )
+                continue
+
+            if self._is_feature_in_cooldown(feature):
+                cooldown_blocked.append(
+                    {
+                        "id": feature.id,
+                        "status": feature.status,
+                        "cooldown_until": feature.cooldown_until,
+                    }
+                )
+                continue
+
             if feature.status == "in_progress":
-                return feature
+                in_progress_ready.append(feature)
+            elif feature.status == "pending":
+                pending_ready.append(feature)
 
-        # 然后处理待开始的
-        for feature in pending:
-            if feature.status == "pending":
-                # 检查依赖是否都已完成
-                if self._check_dependencies(feature):
-                    return feature
+        selected: Optional[Feature] = None
+        if in_progress_ready:
+            # 优先选“上次尝试更早”的进行中任务，避免总是重复挑同一个。
+            in_progress_ready.sort(
+                key=lambda f: (
+                    self._parse_time(f.last_attempt_at) or datetime.min,
+                    f.id,
+                )
+            )
+            selected = in_progress_ready[0]
+        elif pending_ready:
+            selected = pending_ready[0]
 
-        return None
+        return {
+            "feature": selected,
+            "ready_in_progress": [f.id for f in in_progress_ready],
+            "ready_pending": [f.id for f in pending_ready],
+            "dependency_blocked": dependency_blocked,
+            "cooldown_blocked": cooldown_blocked,
+        }
+
+    def _is_feature_in_cooldown(self, feature: Feature) -> bool:
+        """
+        判断功能是否处于冷却期。
+
+        参数:
+            feature: 功能对象
+
+        返回:
+            bool: True 表示仍在冷却期
+        """
+        cooldown_until = self._parse_time(feature.cooldown_until)
+        if cooldown_until is None:
+            return False
+        return datetime.now() < cooldown_until
 
     def _check_dependencies(self, feature: Feature) -> bool:
         """
